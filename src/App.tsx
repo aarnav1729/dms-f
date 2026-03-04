@@ -30,6 +30,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import glbLogo from "@/assets/icon_folder.glb";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -52,6 +53,33 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      "model-viewer": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement>,
+        HTMLElement
+      > & {
+        src?: string;
+        alt?: string;
+        "camera-controls"?: boolean;
+        "disable-zoom"?: boolean;
+        autoplay?: boolean;
+        "auto-rotate"?: boolean;
+        "auto-rotate-delay"?: string | number;
+        "rotation-per-second"?: string;
+        "camera-orbit"?: string;
+        "camera-target"?: string;
+        exposure?: string | number;
+        "shadow-intensity"?: string | number;
+        "shadow-softness"?: string | number;
+        ar?: boolean;
+        "ar-modes"?: string;
+      };
+    }
+  }
+}
 
 type Doc = {
   Id: number;
@@ -201,6 +229,38 @@ function MouseGlow() {
     return () => window.removeEventListener("mousemove", onMove);
   }, []);
   return <div className="global-spotlight" />;
+}
+
+function GLBLogo() {
+  useEffect(() => {
+    if (!customElements.get("model-viewer")) {
+      const s = document.createElement("script");
+      s.type = "module";
+      s.src = "https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js";
+      document.head.appendChild(s);
+    }
+  }, []);
+
+  return (
+    <div className="relative h-8 w-8 sm:h-10 sm:w-10 overflow-visible flex items-center justify-center">
+      <model-viewer
+        src={glbLogo}
+        alt="DMS 3D Logo"
+        camera-controls
+        disable-zoom
+        autoplay
+        auto-rotate
+        auto-rotate-delay="0"
+        rotation-per-second="25deg"
+        camera-orbit="auto 70deg 110%"
+        exposure="1.05"
+        shadow-intensity="1"
+        shadow-softness="1"
+        className="pointer-events-none"
+        style={{ width: 72, height: 72 }}
+      />
+    </div>
+  );
 }
 
 function LoadingScreen() {
@@ -430,10 +490,10 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
       <header className="sticky top-0 z-40 backdrop-blur-xl border-b border-border/60 bg-background/70">
         <div className="w-full px-3 md:px-8 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="h-11 w-11 rounded-2xl bg-gradient-to-br from-sky-500 to-emerald-500 shadow-lg shadow-sky-400/30 animate-float-gentle" />
+            <GLBLogo />
             <div>
-              <h1 className="font-display text-3xl tracking-wide leading-none">DMS</h1>
-              <p className="text-xs text-muted-foreground -mt-1">Premier Energies Document Management</p>
+              <h1 className="font-display text-3xl tracking-wide leading-none">Premier Energies DMS</h1>
+              <p className="text-xs text-muted-foreground -mt-1">Document Management System</p>
             </div>
           </div>
 
@@ -522,7 +582,15 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
         <div className="w-full px-3 md:px-8 py-3 text-xs text-muted-foreground flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <img src="/l.png" alt="Premier Energies logo" className="h-7 w-auto" />
-            <span>Secure DMS Platform</span>
+            <div>
+              <p className="text-sm font-semibold text-foreground">Premier DMS</p>
+              <p className="text-xs text-muted-foreground hidden sm:block">Secure enterprise document operations</p>
+            </div>
+          </div>
+          <div className="hidden sm:flex items-center gap-4 text-xs">
+            <a href="mailto:it.support@premierenergies.com" className="text-primary hover:underline">
+              it.support@premierenergies.com
+            </a>
           </div>
           <span>© {new Date().getFullYear()} Premier Energies. All Rights Reserved.</span>
         </div>
