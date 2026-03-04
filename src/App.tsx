@@ -774,7 +774,6 @@ function DashboardPage() {
                 title="viewer"
                 className="w-full h-[420px] rounded-xl border"
                 src={`/api/documents/${selected.Id}/view?embed=1#toolbar=0&navpanes=0&scrollbar=0`}
-                sandbox={docPermission?.canPrint ? "allow-same-origin allow-downloads" : "allow-same-origin"}
               />
             </div>
             {docPermission ? (
@@ -1671,7 +1670,6 @@ function ApprovalsPage() {
               title="approval-viewer"
               className="w-full h-[70vh] rounded-xl border"
               src={`/api/documents/${viewDocId}/view?embed=1#toolbar=0&navpanes=0&scrollbar=0`}
-              sandbox={viewPerm?.canPrint ? "allow-same-origin allow-downloads" : "allow-same-origin"}
             />
           ) : null}
           <DialogFooter>
