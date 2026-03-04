@@ -632,6 +632,14 @@ function DashboardPage() {
   const viewerRef = React.useRef<HTMLDivElement | null>(null);
   const [deleteDoc, setDeleteDoc] = useState<Doc | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [accessDialogOpen, setAccessDialogOpen] = useState(false);
+  const [accessScope, setAccessScope] = useState("private");
+  const [accessGroupId, setAccessGroupId] = useState("");
+  const [accessGroups, setAccessGroups] = useState<any[]>([]);
+  const [accessEntries, setAccessEntries] = useState<Array<{ email: string; name: string; accessType: string }>>([]);
+  const [accessSearch, setAccessSearch] = useState("");
+  const [accessSuggestions, setAccessSuggestions] = useState<Employee[]>([]);
+  const [accessSaving, setAccessSaving] = useState(false);
 
   const isOwner = (doc: Doc) =>
     String(doc.CreatorEmail || "").toLowerCase() === String(user?.email || "").toLowerCase();
@@ -677,6 +685,83 @@ function DashboardPage() {
     } catch {
       setHistory([]);
       setDocPermission(null);
+    }
+  };
+
+  const openManageAccess = async () => {
+    if (!selected) return;
+    try {
+      const [details, groups] = await Promise.all([
+        api<any>(`/api/documents/${selected.Id}`),
+        api<any[]>("/api/share-groups").catch(() => []),
+      ]);
+      const accessList = Array.isArray(details?.accessList) ? details.accessList : [];
+      const rows = accessList
+        .filter((x: any) => String(x.AccessType || "").toLowerCase() !== "owner")
+        .map((x: any) => ({
+          email: String(x.Email || "").toLowerCase(),
+          name: String(x.Email || "").toLowerCase(),
+          accessType: String(x.AccessType || "view_only"),
+        }));
+      setAccessEntries(rows);
+      setAccessScope(String(details?.document?.ShareScope || selected.ShareScope || "private"));
+      setAccessGroupId(details?.document?.ShareGroupId ? String(details.document.ShareGroupId) : "");
+      setAccessGroups(groups || []);
+      setAccessDialogOpen(true);
+    } catch (e) {
+      toast({ title: "Failed to load access", description: String((e as Error)?.message || ""), variant: "error" });
+    }
+  };
+
+  useEffect(() => {
+    if (!accessDialogOpen) {
+      setAccessSearch("");
+      setAccessSuggestions([]);
+      return;
+    }
+    const q = accessSearch.trim();
+    if (!q) {
+      setAccessSuggestions([]);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      api<Employee[]>(`/api/employees/search?q=${encodeURIComponent(q)}`)
+        .then((r) => setAccessSuggestions(r || []))
+        .catch(() => setAccessSuggestions([]));
+    }, 180);
+    return () => window.clearTimeout(t);
+  }, [accessSearch, accessDialogOpen]);
+
+  const saveAccess = async () => {
+    if (!selected) return;
+    if (accessScope === "group" && !accessGroupId) {
+      toast({ title: "Group required", description: "Please choose a group for group scope.", variant: "info" });
+      return;
+    }
+    setAccessSaving(true);
+    try {
+      const payload = {
+        shareScope: accessScope,
+        shareGroupId: accessScope === "group" ? Number(accessGroupId) : null,
+        entries: accessEntries.map((x) => ({ email: x.email, accessType: x.accessType })),
+      };
+      const result = await api<{ impactedUsers: number }>(`/api/documents/${selected.Id}/access`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      toast({
+        title: "Access updated",
+        description: `Permissions saved. ${result?.impactedUsers || 0} user(s) notified.`,
+        variant: "success",
+      });
+      setAccessDialogOpen(false);
+      fetchDocs();
+      openDoc(selected);
+    } catch (e) {
+      toast({ title: "Failed to save access", description: String((e as Error)?.message || ""), variant: "error" });
+    } finally {
+      setAccessSaving(false);
     }
   };
 
@@ -832,7 +917,10 @@ function DashboardPage() {
               </div>
             ) : null}
             {selected && isOwner(selected) ? (
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={openManageAccess}>
+                  Manage Access
+                </Button>
                 <Button variant="destructive" onClick={() => setDeleteDoc(selected)}>
                   Delete Document
                 </Button>
@@ -869,6 +957,116 @@ function DashboardPage() {
         }}
         onConfirm={confirmDelete}
       />
+      <Dialog open={accessDialogOpen} onOpenChange={setAccessDialogOpen}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Manage Access</DialogTitle>
+            <DialogDescription>Uploader can update users and permission set for this document.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="grid md:grid-cols-2 gap-3">
+              <div>
+                <Label>Share Scope</Label>
+                <Select value={accessScope} onValueChange={setAccessScope}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="private">Private</SelectItem>
+                    <SelectItem value="selected_users">Selected Employees</SelectItem>
+                    <SelectItem value="group">Custom Group</SelectItem>
+                    <SelectItem value="department">Department</SelectItem>
+                    <SelectItem value="company">Company</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {accessScope === "group" ? (
+                <div>
+                  <Label>Group</Label>
+                  <Select value={accessGroupId} onValueChange={setAccessGroupId}>
+                    <SelectTrigger><SelectValue placeholder="Select group" /></SelectTrigger>
+                    <SelectContent>
+                      {accessGroups.map((g) => (
+                        <SelectItem key={g.Id} value={String(g.Id)}>{g.Name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <Label>Add User</Label>
+              <Input
+                placeholder="Search employee by name/email/emp id"
+                value={accessSearch}
+                onChange={(e) => setAccessSearch(e.target.value)}
+              />
+              {accessSuggestions.length ? (
+                <div className="max-h-28 overflow-auto border rounded-md mt-2 text-sm">
+                  {accessSuggestions.map((e) => (
+                    <button
+                      key={e.EmpEmail}
+                      type="button"
+                      className="w-full text-left p-2 border-b hover:bg-muted"
+                      onClick={() => {
+                        const email = String(e.EmpEmail || "").toLowerCase();
+                        if (!email || email === String(user?.email || "").toLowerCase()) return;
+                        setAccessEntries((prev) => {
+                          if (prev.some((p) => p.email === email)) return prev;
+                          return [...prev, { email, name: e.EmpName || email, accessType: "view_only" }];
+                        });
+                      }}
+                    >
+                      {e.EmpName} ({e.EmpEmail})
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="max-h-56 overflow-auto border rounded-md">
+              {accessEntries.length === 0 ? (
+                <p className="p-3 text-sm text-muted-foreground">No explicit users added.</p>
+              ) : accessEntries.map((row) => (
+                <div key={row.email} className="p-2 border-b flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm">
+                    <div className="font-medium">{row.name}</div>
+                    <div className="text-xs text-muted-foreground">{row.email}</div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[
+                      { key: "view_only", label: "View" },
+                      { key: "view_print", label: "View+Print" },
+                      { key: "view_print_download", label: "View+Print+Download" },
+                    ].map((opt) => (
+                      <label key={opt.key} className="text-xs inline-flex items-center gap-1 border rounded-full px-2 py-1">
+                        <Checkbox
+                          checked={row.accessType === opt.key}
+                          onCheckedChange={(v) => {
+                            if (!v) return;
+                            setAccessEntries((prev) => prev.map((p) => (p.email === row.email ? { ...p, accessType: opt.key } : p)));
+                          }}
+                        />
+                        {opt.label}
+                      </label>
+                    ))}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setAccessEntries((prev) => prev.filter((p) => p.email !== row.email))}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAccessDialogOpen(false)} disabled={accessSaving}>Cancel</Button>
+            <Button onClick={saveAccess} disabled={accessSaving}>{accessSaving ? "Saving..." : "Save Access"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

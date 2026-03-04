@@ -1379,8 +1379,12 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
   </div>
 </div>
 <div id="pages"></div>
-<script type="module">
-  import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs";
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  const pdfjsLib = window["pdfjs-dist/build/pdf"];
+  if (pdfjsLib) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
   document.addEventListener("contextmenu", (e)=>e.preventDefault());
   document.addEventListener("keydown", (e)=>{
     const k = e.key.toLowerCase();
@@ -1391,7 +1395,8 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
     const r = await fetch("/api/documents/${docId}/view?embed=1&raw=1", { credentials: "include", headers: { "x-dms-inline": "1" }});
     if (!r.ok) throw new Error("Unable to load document");
     const bytes = new Uint8Array(await r.arrayBuffer());
-    const pdf = await pdfjsLib.getDocument({ data: bytes, disableAutoFetch: true, disableStream: true, disableWorker: true }).promise;
+    if (!pdfjsLib) throw new Error("pdfjs_unavailable");
+    const pdf = await pdfjsLib.getDocument({ data: bytes, disableAutoFetch: true, disableStream: true }).promise;
     const wrap = document.getElementById("pages");
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
@@ -1405,7 +1410,7 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
     }
   } catch (e) {
     const wrap = document.getElementById("pages");
-    wrap.innerHTML = "<div style='padding:18px;color:#fecaca;background:#7f1d1d;border-radius:8px'>Unable to render preview in this browser session. Please refresh and try again.</div>";
+    wrap.innerHTML = "<div style='padding:18px;color:#fecaca;background:#7f1d1d;border-radius:8px'>Unable to render preview in this browser session.</div>";
   }
   const printBtn = document.getElementById("printBtn");
   if (printBtn) printBtn.addEventListener("click", () => window.print());
@@ -1450,6 +1455,115 @@ app.get("/api/documents/:id/permission", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("[Permission] error:", err.message);
     res.status(500).json({ error: "Failed to fetch permission" });
+  }
+});
+
+// PUT /api/documents/:id/access
+app.put("/api/documents/:id/access", requireAuth, async (req, res) => {
+  try {
+    const docId = Number(req.params.id);
+    const {
+      shareScope,
+      shareGroupId,
+      entries,
+    } = req.body || {};
+
+    const docResult = await dmsPool.request()
+      .input("id", sql.Int, docId)
+      .query("SELECT Id, Title, CreatorEmail, ShareScope, ShareGroupId FROM DmsDocuments WHERE Id=@id AND Status != 'deleted'");
+    if (!docResult.recordset.length) return res.status(404).json({ error: "Document not found" });
+    const doc = docResult.recordset[0];
+
+    const isAdmin = (await dmsPool.request().input("ae", sql.NVarChar, req.user.email)
+      .query("SELECT Email FROM DmsAdmins WHERE Email = @ae AND Active = 1")).recordset.length > 0;
+    const isCreator = String(doc.CreatorEmail || "").toLowerCase() === String(req.user.email || "").toLowerCase();
+    if (!isAdmin && !isCreator) {
+      return res.status(403).json({ error: "Only uploader or admin can update access" });
+    }
+
+    const validScopes = new Set(["private", "group", "department", "company", "selected_users"]);
+    const nextScope = validScopes.has(String(shareScope || "").toLowerCase())
+      ? String(shareScope).toLowerCase()
+      : String(doc.ShareScope || "private").toLowerCase();
+    const nextGroupId = nextScope === "group" ? Number(shareGroupId || 0) || null : null;
+    if (nextScope === "group" && !nextGroupId) {
+      return res.status(400).json({ error: "groupId_required_for_group_scope" });
+    }
+
+    const oldAccessRows = await dmsPool.request()
+      .input("docId", sql.Int, docId)
+      .query("SELECT Email, AccessType FROM DmsDocAccess WHERE DocId=@docId AND AccessType != 'owner'");
+    const beforeMap = new Map(oldAccessRows.recordset.map((x) => [String(x.Email || "").toLowerCase(), normalizeAccessType(x.AccessType)]));
+
+    const cleanedEntries = Array.from(
+      new Map(
+        (Array.isArray(entries) ? entries : [])
+          .map((x) => ({
+            email: String(x?.email || "").trim().toLowerCase(),
+            accessType: normalizeAccessType(x?.accessType || "view_only"),
+          }))
+          .filter((x) => x.email && x.email.includes("@") && x.email !== String(doc.CreatorEmail || "").toLowerCase())
+          .map((x) => [x.email, x])
+      ).values()
+    );
+    const afterMap = new Map(cleanedEntries.map((x) => [x.email, x.accessType]));
+
+    await dmsPool.request()
+      .input("docId", sql.Int, docId)
+      .query("DELETE FROM DmsDocAccess WHERE DocId=@docId AND AccessType != 'owner'");
+
+    for (const row of cleanedEntries) {
+      await dmsPool.request()
+        .input("docId", sql.Int, docId)
+        .input("email", sql.NVarChar, row.email)
+        .input("accessType", sql.NVarChar, row.accessType)
+        .query("INSERT INTO DmsDocAccess (DocId, Email, AccessType) VALUES (@docId, @email, @accessType)");
+    }
+
+    await dmsPool.request()
+      .input("docId", sql.Int, docId)
+      .input("shareScope", sql.NVarChar, nextScope)
+      .input("shareGroupId", sql.Int, nextGroupId)
+      .query(`
+        UPDATE DmsDocuments
+        SET ShareScope=@shareScope, ShareGroupId=@shareGroupId, UpdatedAt=SYSUTCDATETIME()
+        WHERE Id=@docId
+      `);
+
+    const impacted = Array.from(new Set([...beforeMap.keys(), ...afterMap.keys()]))
+      .filter((email) => beforeMap.get(email) !== afterMap.get(email));
+
+    for (const email of impacted) {
+      const previous = beforeMap.get(email) || null;
+      const next = afterMap.get(email) || null;
+      const subject = `[DMS] Access Updated: ${doc.Title}`;
+      const html = next
+        ? `<h3>Document Access Updated</h3>
+           <p>Your access to <strong>${doc.Title}</strong> has been updated.</p>
+           <p><strong>Previous:</strong> ${previous || "No access"}</p>
+           <p><strong>Current:</strong> ${next}</p>
+           <p>Updated by: ${req.user.email}</p>`
+        : `<h3>Document Access Removed</h3>
+           <p>Your access to <strong>${doc.Title}</strong> has been removed.</p>
+           <p>Updated by: ${req.user.email}</p>`;
+      await sendEmail(email, subject, html).catch(() => {});
+    }
+
+    await logAudit(
+      "document_access_update",
+      "document",
+      docId,
+      req.user.email,
+      "Updated access users/permissions",
+      { shareScope: doc.ShareScope, shareGroupId: doc.ShareGroupId, access: Object.fromEntries(beforeMap) },
+      { shareScope: nextScope, shareGroupId: nextGroupId, access: Object.fromEntries(afterMap) },
+      getIp(req)
+    );
+
+    res.json({ success: true, impactedUsers: impacted.length });
+  } catch (err) {
+    console.error("[DocAccess] update error:", err.message);
+    res.status(500).json({ error: "Failed to update document access" });
   }
 });
 
