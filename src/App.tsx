@@ -98,6 +98,7 @@ const ADMIN_NAV = [
 const USER_NAV = [
   { to: "/", label: "Dashboard" },
   { to: "/upload", label: "Upload" },
+  { to: "/groups", label: "Groups" },
   { to: "/approvals", label: "Approvals" },
   { to: "/verify", label: "Verify Copy" },
 ];
@@ -666,6 +667,7 @@ function PublicLinksPanel({ docId }: { docId: number }) {
 
 function UploadPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [metadata, setMetadata] = useState("{}");
@@ -734,6 +736,10 @@ function UploadPage() {
   const submit = async () => {
     if (!file && folderFiles.length === 0) {
       alert("Choose a file or folder.");
+      return;
+    }
+    if (shareScope === "group" && !shareGroupId) {
+      alert("Please select a group for group-based sharing.");
       return;
     }
     if (isControlled && !reason.trim()) {
@@ -902,7 +908,7 @@ function UploadPage() {
 
           <div className="flex gap-2 flex-wrap">
             <Button onClick={submit} disabled={saving} data-tour="upload-submit">{saving ? "Uploading..." : "Upload"}</Button>
-            <CreateGroupInline onSaved={() => api<any[]>("/api/share-groups").then(setGroups).catch(() => setGroups([]))} />
+            <Button variant="outline" onClick={() => navigate("/groups")}>Manage Groups</Button>
           </div>
         </CardContent>
       </Card>
@@ -1022,6 +1028,161 @@ function CreateGroupInline({ onSaved }: { onSaved: () => void }) {
         <Button variant="outline" size="sm" onClick={save} disabled={!name.trim() || members.length === 0}>Save Group</Button>
       </CardContent>
     </Card>
+  );
+}
+
+function GroupsPage() {
+  const [groups, setGroups] = useState<any[]>([]);
+  const [name, setName] = useState("");
+  const [search, setSearch] = useState("");
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [members, setMembers] = useState<string[]>([]);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+
+  const loadGroups = () => api<any[]>("/api/share-groups").then(setGroups).catch(() => setGroups([]));
+
+  useEffect(() => { loadGroups(); }, []);
+
+  useEffect(() => {
+    const q = search.trim();
+    if (!q) {
+      setEmployees([]);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      api<Employee[]>(`/api/employees/search?q=${encodeURIComponent(q)}`).then(setEmployees).catch(() => setEmployees([]));
+    }, 180);
+    return () => window.clearTimeout(t);
+  }, [search]);
+
+  const resetForm = () => {
+    setEditingId(null);
+    setName("");
+    setMembers([]);
+    setSearch("");
+    setEmployees([]);
+  };
+
+  const submit = async () => {
+    setError("");
+    setStatus("");
+    if (!name.trim()) {
+      setError("Group name is required.");
+      return;
+    }
+    if (!members.length) {
+      setError("Add at least one member.");
+      return;
+    }
+    try {
+      const payload = { name: name.trim(), members };
+      if (editingId) {
+        await api(`/api/share-groups/${editingId}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        setStatus("Group updated.");
+      } else {
+        await api("/api/share-groups", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        setStatus("Group created.");
+      }
+      resetForm();
+      loadGroups();
+    } catch (e) {
+      setError(String((e as Error)?.message || "Operation failed"));
+    }
+  };
+
+  const startEdit = (g: any) => {
+    setEditingId(g.Id);
+    setName(g.Name || "");
+    setMembers(Array.isArray(g.members) ? g.members : []);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const remove = async (id: number) => {
+    if (!window.confirm("Delete this group?")) return;
+    try {
+      await api(`/api/share-groups/${id}`, { method: "DELETE" });
+      if (editingId === id) resetForm();
+      setStatus("Group deleted.");
+      loadGroups();
+    } catch (e) {
+      setError(String((e as Error)?.message || "Delete failed"));
+    }
+  };
+
+  return (
+    <div className="grid xl:grid-cols-3 gap-4 animate-fade-in">
+      <Card className="xl:col-span-2 glass">
+        <CardHeader>
+          <CardTitle>Group Management</CardTitle>
+          <CardDescription>Create and maintain reusable sharing groups with employee search.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid md:grid-cols-2 gap-2">
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Group name" />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search member (name/email/emp id/dept/location)" />
+          </div>
+
+          <div className="max-h-40 overflow-auto border rounded-md">
+            {search.trim().length > 0 && employees.length === 0 ? <p className="p-2 text-sm text-muted-foreground">No matches.</p> : null}
+            {employees.map((e) => (
+              <button
+                key={e.EmpEmail}
+                type="button"
+                className="w-full text-left p-2 border-b hover:bg-muted text-sm"
+                onClick={() => setMembers((prev) => Array.from(new Set([...prev, e.EmpEmail.toLowerCase()])))}
+              >
+                <strong>{e.EmpName}</strong> ({e.EmpEmail}) · {(e.Department || e.Dept || "")} · {(e.Location || e.EmpLocation || "")}
+              </button>
+            ))}
+          </div>
+
+          <div className="max-h-32 overflow-auto border rounded-md p-2 flex flex-wrap gap-1">
+            {members.length === 0 ? <span className="text-xs text-muted-foreground">No members selected.</span> : null}
+            {members.map((m) => (
+              <button key={m} className="text-xs px-2 py-1 rounded-full border hover:bg-muted" onClick={() => setMembers((prev) => prev.filter((x) => x !== m))}>
+                {m} ×
+              </button>
+            ))}
+          </div>
+
+          {error ? <div className="text-xs text-destructive">{error}</div> : null}
+          {status ? <div className="text-xs text-emerald-700">{status}</div> : null}
+
+          <div className="flex gap-2">
+            <Button onClick={submit}>{editingId ? "Update Group" : "Create Group"}</Button>
+            {editingId ? <Button variant="outline" onClick={resetForm}>Cancel Edit</Button> : null}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="glass">
+        <CardHeader><CardTitle>Your Groups</CardTitle></CardHeader>
+        <CardContent className="max-h-[620px] overflow-auto space-y-2">
+          {groups.length === 0 ? <p className="text-sm text-muted-foreground">No groups created yet.</p> : null}
+          {groups.map((g) => (
+            <div key={g.Id} className="border rounded-md p-2 text-sm space-y-1">
+              <div className="font-semibold">{g.Name}</div>
+              <div className="text-xs text-muted-foreground">{(g.members || []).length} members</div>
+              <div className="text-xs max-h-20 overflow-auto border rounded p-1">{(g.members || []).join(", ") || "No members"}</div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => startEdit(g)}>Edit</Button>
+                <Button size="sm" variant="destructive" onClick={() => remove(g.Id)}>Delete</Button>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -1659,6 +1820,7 @@ function AuthenticatedApp() {
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/upload" element={<UploadPage />} />
+        <Route path="/groups" element={<GroupsPage />} />
         <Route path="/approvals" element={<ApprovalsPage />} />
         <Route path="/verify" element={<VerifyPage />} />
         <Route path="/admin/users" element={<AdminGate><AdminUsersPage /></AdminGate>} />
