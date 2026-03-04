@@ -23,7 +23,7 @@ const { ClientSecretCredential } = require("@azure/identity");
 require("isomorphic-fetch");
 
 // ─── Config from env ────────────────────────────────────────────
-const PORT = Number(process.env.PORT) || 21445;
+const PORT = Number(process.env.PORT) || 42443;
 const HOST = process.env.HOST || "0.0.0.0";
 const DEV_BYPASS_AUTH = String(process.env.DMS_DEV_BYPASS_AUTH || "").toLowerCase() === "true";
 const DEV_BYPASS_ADMIN = String(process.env.DMS_DEV_BYPASS_ADMIN || "").toLowerCase() === "true";
@@ -537,6 +537,28 @@ app.use(cookieParser());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
+// ─── AUTH STUB ROUTES ───────────────────────────────────────────
+// DMS does NOT issue its own tokens – auth is handled by digi.premierenergies.com.
+// These stubs exist so the SPA fallback doesn't serve index.html for /auth/* paths,
+// which would cause the AuthContext to think refresh succeeded (200 HTML != JSON).
+
+app.post("/auth/refresh", (_req, res) => {
+  // DMS cannot refresh tokens; only digi can. Return 401 so the client
+  // knows to redirect to digi for a fresh session.
+  return res.status(401).json({ error: "refresh_not_supported", message: "Authenticate via digi.premierenergies.com" });
+});
+
+app.post("/auth/logout", (_req, res) => {
+  // Clear the SSO cookie on this domain so the browser stops sending it
+  const COOKIE_DOMAIN = (process.env.COOKIE_DOMAIN || "").trim();
+  const clearOpts = { path: "/", httpOnly: true, secure: true, sameSite: "none" };
+  res.clearCookie("sso", clearOpts);
+  res.clearCookie("sso", { ...clearOpts, domain: COOKIE_DOMAIN || undefined });
+  res.clearCookie("sso_refresh", { ...clearOpts, path: "/auth" });
+  res.clearCookie("sso_refresh", { ...clearOpts, path: "/auth", domain: COOKIE_DOMAIN || undefined });
+  return res.json({ ok: true });
+});
+
 // ─── 7A. SESSION & PROFILE ─────────────────────────────────────
 
 // GET /api/session
@@ -552,6 +574,7 @@ app.get("/api/session", requireAuth, async (req, res) => {
     const isAdmin = DEV_BYPASS_AUTH && DEV_BYPASS_ADMIN ? true : adminResult.recordset.length > 0;
 
     // Get employee details from SPOT
+    // ── FIX: EMP columns are Dept, EmpLocation, ManagerID (not Department, Location, ReportingManagerID)
     const empResult = await spotPool
       .request()
       .input("email", sql.NVarChar, email)
@@ -561,7 +584,7 @@ app.get("/api/session", requireAuth, async (req, res) => {
           rm.EmpEmail AS ReportingManagerEmail,
           rm.EmpName AS ReportingManagerName
         FROM EMP e
-        LEFT JOIN EMP rm ON rm.EmpID = e.ReportingManagerID
+        LEFT JOIN EMP rm ON rm.EmpID = e.ManagerID
         WHERE e.EmpEmail = @email
       `);
 
@@ -576,9 +599,9 @@ app.get("/api/session", requireAuth, async (req, res) => {
       isAdmin,
       empId: emp.EmpID || null,
       empName: emp.EmpName || null,
-      department: emp.Department || null,
-      location: emp.Location || null,
-      reportingManagerId: emp.ReportingManagerID || null,
+      department: emp.Dept || null,
+      location: emp.EmpLocation || null,
+      reportingManagerId: emp.ManagerID || null,
       reportingManagerEmail: emp.ReportingManagerEmail || null,
       reportingManagerName: emp.ReportingManagerName || null,
       employee: emp,
@@ -622,7 +645,7 @@ app.get("/api/employees/search", requireAuth, async (req, res) => {
       .request()
       .input("q", sql.NVarChar, `%${q}%`)
       .query(`
-        SELECT TOP 20 EmpID, EmpName, EmpEmail, Department, Location
+        SELECT TOP 20 EmpID, EmpName, EmpEmail, Dept AS Department, EmpLocation AS Location
         FROM EMP
         WHERE (EmpName LIKE @q OR EmpEmail LIKE @q)
           AND ActiveFlag = 1
@@ -653,11 +676,11 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
     const fileHash = await computeFileHash(filePath);
     const controlled = isControlled === "true" || isControlled === true || isControlled === "1";
 
-    // Get employee info
+    // Get employee info – FIX: use correct EMP columns
     const empResult = await spotPool
       .request()
       .input("email", sql.NVarChar, req.user.email)
-      .query("SELECT TOP 1 EmpID, EmpName, Department, Location, ReportingManagerID FROM EMP WHERE EmpEmail = @email");
+      .query("SELECT TOP 1 EmpID, EmpName, Dept, EmpLocation, ManagerID FROM EMP WHERE EmpEmail = @email");
     const emp = empResult.recordset[0] || {};
 
     const status = controlled ? "pending_approval" : "active";
@@ -679,8 +702,8 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       .input("shareGroupId", sql.Int, shareGroupId ? Number(shareGroupId) : null)
       .input("creatorEmail", sql.NVarChar, req.user.email)
       .input("creatorEmpId", sql.NVarChar, emp.EmpID || null)
-      .input("department", sql.NVarChar, emp.Department || null)
-      .input("location", sql.NVarChar, emp.Location || null)
+      .input("department", sql.NVarChar, emp.Dept || null)
+      .input("location", sql.NVarChar, emp.EmpLocation || null)
       .input("fileHash", sql.NVarChar, fileHash)
       .input("approvalStatus", sql.NVarChar, approvalStatus)
       .input("searchContent", sql.NVarChar, searchContent)
@@ -723,10 +746,10 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       `);
 
     // If controlled, create approval for reporting manager
-    if (controlled && emp.ReportingManagerID) {
+    if (controlled && emp.ManagerID) {
       const rmResult = await spotPool
         .request()
-        .input("rmId", sql.NVarChar, emp.ReportingManagerID)
+        .input("rmId", sql.NVarChar, emp.ManagerID)
         .query("SELECT TOP 1 EmpEmail, EmpName FROM EMP WHERE EmpID = @rmId");
 
       if (rmResult.recordset.length > 0) {
@@ -782,8 +805,7 @@ app.get("/api/documents", requireAuth, async (req, res) => {
     const request = dmsPool.request();
     request.input("userEmail", sql.NVarChar, req.user.email);
 
-    // Access control: user can see docs they own, have access to, are shared with their dept, company-wide, or in their share group
-    // Also admins can see all
+    // Access control
     const adminCheck = await dmsPool
       .request()
       .input("aEmail", sql.NVarChar, req.user.email)
@@ -791,13 +813,13 @@ app.get("/api/documents", requireAuth, async (req, res) => {
     const isAdmin = adminCheck.recordset.length > 0;
 
     if (!isAdmin) {
-      // Get user's department and location from SPOT
+      // Get user's department and location from SPOT – FIX: use correct EMP columns
       const empCheck = await spotPool
         .request()
         .input("eEmail", sql.NVarChar, req.user.email)
-        .query("SELECT TOP 1 Department, Location FROM EMP WHERE EmpEmail = @eEmail");
-      const userDept = empCheck.recordset[0]?.Department || "";
-      const userLoc = empCheck.recordset[0]?.Location || "";
+        .query("SELECT TOP 1 Dept, EmpLocation FROM EMP WHERE EmpEmail = @eEmail");
+      const userDept = empCheck.recordset[0]?.Dept || "";
+      const userLoc = empCheck.recordset[0]?.EmpLocation || "";
 
       request.input("userDept", sql.NVarChar, userDept);
       request.input("userLoc", sql.NVarChar, userLoc);
@@ -869,7 +891,7 @@ app.get("/api/documents", requireAuth, async (req, res) => {
 
     const whereStr = whereClauses.join(" AND ");
 
-    // Count
+    // Count – FIX: use correct EMP columns in subqueries
     const countResult = await dmsPool
       .request()
       .input("userEmail", sql.NVarChar, req.user.email)
@@ -886,8 +908,8 @@ app.get("/api/documents", requireAuth, async (req, res) => {
       .input("creator", sql.NVarChar, creator || null)
       .input("version", sql.Int, version ? Number(version) : null)
       .input("approver", sql.NVarChar, approver || null)
-      .input("userDept", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail2", sql.NVarChar, req.user.email).query("SELECT TOP 1 Department FROM EMP WHERE EmpEmail = @eEmail2")).recordset[0]?.Department || ""))
-      .input("userLoc", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail3", sql.NVarChar, req.user.email).query("SELECT TOP 1 Location FROM EMP WHERE EmpEmail = @eEmail3")).recordset[0]?.Location || ""))
+      .input("userDept", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail2", sql.NVarChar, req.user.email).query("SELECT TOP 1 Dept FROM EMP WHERE EmpEmail = @eEmail2")).recordset[0]?.Dept || ""))
+      .input("userLoc", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail3", sql.NVarChar, req.user.email).query("SELECT TOP 1 EmpLocation FROM EMP WHERE EmpEmail = @eEmail3")).recordset[0]?.EmpLocation || ""))
       .query(`SELECT COUNT(*) as total FROM DmsDocuments d WHERE ${whereStr}`);
 
     const total = countResult.recordset[0].total;
@@ -945,8 +967,9 @@ app.get("/api/documents/:id", requireAuth, async (req, res) => {
 
       if (!hasAccess && doc.ShareScope !== "company") {
         if (doc.ShareScope === "department") {
+          // FIX: use correct EMP column
           const userDept = (await spotPool.request().input("ue2", sql.NVarChar, req.user.email)
-            .query("SELECT TOP 1 Department FROM EMP WHERE EmpEmail = @ue2")).recordset[0]?.Department;
+            .query("SELECT TOP 1 Dept FROM EMP WHERE EmpEmail = @ue2")).recordset[0]?.Dept;
           if (userDept !== doc.Department) {
             return res.status(403).json({ error: "Access denied" });
           }
@@ -1025,7 +1048,6 @@ app.get("/api/documents/:id/download", requireAuth, async (req, res) => {
 
     const doc = docResult.recordset[0];
 
-    // Check access (simplified: allow if creator, admin, has access, or company shared)
     const canAccess = await checkDocAccess(docId, req.user.email);
     if (!canAccess) {
       return res.status(403).json({ error: "Access denied" });
@@ -1122,7 +1144,6 @@ app.delete("/api/documents/:id", requireAuth, async (req, res) => {
 
     const doc = docResult.recordset[0];
 
-    // Only admin or creator can delete
     const isAdmin = (await dmsPool.request().input("ae", sql.NVarChar, req.user.email)
       .query("SELECT Email FROM DmsAdmins WHERE Email = @ae AND Active = 1")).recordset.length > 0;
 
@@ -1163,7 +1184,6 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
 
     const doc = docResult.recordset[0];
 
-    // Only creator or admin can upload new version
     const isAdmin = (await dmsPool.request().input("ae", sql.NVarChar, req.user.email)
       .query("SELECT Email FROM DmsAdmins WHERE Email = @ae AND Active = 1")).recordset.length > 0;
     if (!isAdmin && doc.CreatorEmail !== req.user.email) {
@@ -1175,7 +1195,7 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
     const fileHash = await computeFileHash(filePath);
     const { reason, metadata } = req.body;
 
-    // Mark old document as obsolete and move prior file under /obsolete
+    // Mark old document as obsolete
     const obsoletePath = moveFileToObsolete(doc.FilePath);
     await dmsPool
       .request()
@@ -1183,11 +1203,11 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
       .input("obsoletePath", sql.NVarChar, obsoletePath)
       .query("UPDATE DmsDocuments SET IsObsolete = 1, FilePath = @obsoletePath, UpdatedAt = SYSUTCDATETIME() WHERE Id = @id");
 
-    // Get employee info for the new doc
+    // Get employee info – FIX: use correct EMP columns
     const empResult = await spotPool
       .request()
       .input("email", sql.NVarChar, req.user.email)
-      .query("SELECT TOP 1 EmpID, EmpName, Department, Location, ReportingManagerID FROM EMP WHERE EmpEmail = @email");
+      .query("SELECT TOP 1 EmpID, EmpName, Dept, EmpLocation, ManagerID FROM EMP WHERE EmpEmail = @email");
     const emp = empResult.recordset[0] || {};
 
     const metadataText = typeof metadata === "string" ? metadata : JSON.stringify(metadata || {});
@@ -1209,8 +1229,8 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
       .input("shareGroupId", sql.Int, doc.ShareGroupId)
       .input("creatorEmail", sql.NVarChar, req.user.email)
       .input("creatorEmpId", sql.NVarChar, emp.EmpID || doc.CreatorEmpId)
-      .input("department", sql.NVarChar, emp.Department || doc.Department)
-      .input("location", sql.NVarChar, emp.Location || doc.Location)
+      .input("department", sql.NVarChar, emp.Dept || doc.Department)
+      .input("location", sql.NVarChar, emp.EmpLocation || doc.Location)
       .input("fileHash", sql.NVarChar, fileHash)
       .input("parentDocId", sql.Int, docId)
       .input("approvalStatus", sql.NVarChar, "pending_rm")
@@ -1256,11 +1276,11 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
         SELECT @newDocId, Email, AccessType FROM DmsDocAccess WHERE DocId = @oldDocId
       `);
 
-    // Create RM approval for new version
-    if (emp.ReportingManagerID) {
+    // Create RM approval for new version – FIX: use ManagerID
+    if (emp.ManagerID) {
       const rmResult = await spotPool
         .request()
-        .input("rmId", sql.NVarChar, emp.ReportingManagerID)
+        .input("rmId", sql.NVarChar, emp.ManagerID)
         .query("SELECT TOP 1 EmpEmail, EmpName FROM EMP WHERE EmpID = @rmId");
 
       if (rmResult.recordset.length > 0) {
@@ -1433,7 +1453,6 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
     const approvalId = Number(req.params.approvalId);
     const { comments } = req.body;
 
-    // Get the approval
     const apResult = await dmsPool
       .request()
       .input("id", sql.Int, approvalId)
@@ -1445,12 +1464,10 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
 
     const approval = apResult.recordset[0];
 
-    // Verify the approver is the logged-in user
     if (approval.ApproverEmail !== req.user.email) {
       return res.status(403).json({ error: "You are not the designated approver" });
     }
 
-    // Update approval status
     await dmsPool
       .request()
       .input("id", sql.Int, approvalId)
@@ -1463,7 +1480,6 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
     const docId = approval.DocId;
     const version = approval.Version;
 
-    // Get the document
     const docResult = await dmsPool
       .request()
       .input("docId", sql.Int, docId)
@@ -1474,8 +1490,6 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
     let docFullyApproved = false;
 
     if (approval.Stage === "reporting_manager") {
-      // Next: HOD
-      // Check if HOD exists for this location+department
       const hodResult = await dmsPool
         .request()
         .input("location", sql.NVarChar, doc.Location || "")
@@ -1512,7 +1526,6 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
            <p>Please log in to the DMS to review.</p>`
         );
       } else {
-        // No HOD configured, skip to document controller
         await dmsPool
           .request()
           .input("docId", sql.Int, docId)
@@ -1522,11 +1535,9 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
         await createDcApproval(docId, version, doc);
       }
     } else if (approval.Stage === "hod") {
-      // Next: Document Controller
       nextStage = "document_controller";
       await createDcApproval(docId, version, doc);
     } else if (approval.Stage === "document_controller") {
-      // Fully approved!
       docFullyApproved = true;
 
       const finalHash = await computeFileHash(doc.FilePath);
@@ -1541,7 +1552,6 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
           WHERE Id = @docId
         `);
 
-      // Send completion notification
       await sendApprovalCompletionEmail(doc, version, req.user.email);
     }
 
@@ -1578,7 +1588,6 @@ app.post("/api/approvals/:approvalId/reject", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "You are not the designated approver" });
     }
 
-    // Update approval
     await dmsPool
       .request()
       .input("id", sql.Int, approvalId)
@@ -1588,13 +1597,11 @@ app.post("/api/approvals/:approvalId/reject", requireAuth, async (req, res) => {
         WHERE Id = @id
       `);
 
-    // Update document status
     await dmsPool
       .request()
       .input("docId", sql.Int, approval.DocId)
       .query("UPDATE DmsDocuments SET Status = 'rejected', ApprovalStatus = 'rejected', UpdatedAt = SYSUTCDATETIME() WHERE Id = @docId");
 
-    // Notify creator
     const docResult = await dmsPool.request().input("did", sql.Int, approval.DocId)
       .query("SELECT Title, CreatorEmail FROM DmsDocuments WHERE Id = @did");
     const doc = docResult.recordset[0];
@@ -1626,10 +1633,8 @@ app.post("/api/approvals/:approvalId/reject", requireAuth, async (req, res) => {
 // Helper: create document controller approval
 async function createDcApproval(docId, version, doc) {
   try {
-    // Get all active admins (document controllers)
     const admins = await dmsPool.request().query("SELECT Email FROM DmsAdmins WHERE Active = 1");
     if (admins.recordset.length > 0) {
-      // Assign to first admin as DC
       const dcEmail = admins.recordset[0].Email;
 
       await dmsPool
@@ -1666,7 +1671,6 @@ async function createDcApproval(docId, version, doc) {
 // Helper: send approval completion email
 async function sendApprovalCompletionEmail(doc, version, dcEmail) {
   try {
-    // Collect all approvers
     const approvals = await dmsPool
       .request()
       .input("docId", sql.Int, doc.Id)
@@ -1674,7 +1678,6 @@ async function sendApprovalCompletionEmail(doc, version, dcEmail) {
 
     const approverEmails = approvals.recordset.map((a) => a.ApproverEmail);
 
-    // Get users with view access
     const accessList = await dmsPool
       .request()
       .input("docId", sql.Int, doc.Id)
@@ -1698,64 +1701,47 @@ async function sendApprovalCompletionEmail(doc, version, dcEmail) {
     `;
 
     if (ccEmails.length > 0) {
-      await sendEmailWithCc(
-        toEmails,
-        ccEmails,
-        `[DMS] Document Approved: ${doc.Title} v${version}`,
-        html
-      );
+      await sendEmailWithCc(toEmails, ccEmails, `[DMS] Document Approved: ${doc.Title} v${version}`, html);
     } else {
-      await sendEmail(
-        toEmails,
-        `[DMS] Document Approved: ${doc.Title} v${version}`,
-        html
-      );
+      await sendEmail(toEmails, `[DMS] Document Approved: ${doc.Title} v${version}`, html);
     }
   } catch (err) {
     console.error("[ApprovalEmail] error:", err.message);
   }
 }
 
-// Helper: check document access
+// Helper: check document access – FIX: use correct EMP column
 async function checkDocAccess(docId, email) {
   try {
-    // Admin check
     const isAdmin = (await dmsPool.request().input("ae", sql.NVarChar, email)
       .query("SELECT Email FROM DmsAdmins WHERE Email = @ae AND Active = 1")).recordset.length > 0;
     if (isAdmin) return true;
 
-    // Get doc
     const docResult = await dmsPool.request().input("id", sql.Int, docId)
       .query("SELECT CreatorEmail, ShareScope, ShareGroupId, Department FROM DmsDocuments WHERE Id = @id AND Status != 'deleted'");
     if (docResult.recordset.length === 0) return false;
     const doc = docResult.recordset[0];
 
-    // Creator
     if (doc.CreatorEmail === email) return true;
 
-    // Explicit access
     const hasAccess = (await dmsPool.request().input("did", sql.Int, docId).input("ue", sql.NVarChar, email)
       .query("SELECT 1 FROM DmsDocAccess WHERE DocId = @did AND Email = @ue")).recordset.length > 0;
     if (hasAccess) return true;
 
-    // Company share
     if (doc.ShareScope === "company") return true;
 
-    // Department share
     if (doc.ShareScope === "department") {
       const userDept = (await spotPool.request().input("ue2", sql.NVarChar, email)
-        .query("SELECT TOP 1 Department FROM EMP WHERE EmpEmail = @ue2")).recordset[0]?.Department;
+        .query("SELECT TOP 1 Dept FROM EMP WHERE EmpEmail = @ue2")).recordset[0]?.Dept;
       if (userDept === doc.Department) return true;
     }
 
-    // Group share
     if (doc.ShareScope === "group" && doc.ShareGroupId) {
       const inGroup = (await dmsPool.request().input("gid", sql.Int, doc.ShareGroupId).input("ue3", sql.NVarChar, email)
         .query("SELECT 1 FROM DmsShareGroupMembers WHERE GroupId = @gid AND Email = @ue3")).recordset.length > 0;
       if (inGroup) return true;
     }
 
-    // Approver
     const isApprover = (await dmsPool.request().input("did2", sql.Int, docId).input("ue4", sql.NVarChar, email)
       .query("SELECT 1 FROM DmsApprovals WHERE DocId = @did2 AND ApproverEmail = @ue4")).recordset.length > 0;
     if (isApprover) return true;
@@ -1788,7 +1774,6 @@ app.post("/api/hods", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "location, department, and hodEmail are required" });
     }
 
-    // Upsert: if exists update, else insert
     const existing = await dmsPool
       .request()
       .input("location", sql.NVarChar, location)
@@ -1891,11 +1876,11 @@ app.delete("/api/hods/:id", requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/hods/locations-departments
+// GET /api/hods/locations-departments – FIX: use correct EMP columns
 app.get("/api/hods/locations-departments", requireAdmin, async (req, res) => {
   try {
-    const locations = await spotPool.request().query("SELECT DISTINCT Location FROM EMP WHERE Location IS NOT NULL AND Location != '' AND ActiveFlag = 1 ORDER BY Location");
-    const departments = await spotPool.request().query("SELECT DISTINCT Department FROM EMP WHERE Department IS NOT NULL AND Department != '' AND ActiveFlag = 1 ORDER BY Department");
+    const locations = await spotPool.request().query("SELECT DISTINCT EmpLocation AS Location FROM EMP WHERE EmpLocation IS NOT NULL AND EmpLocation != '' AND ActiveFlag = 1 ORDER BY EmpLocation");
+    const departments = await spotPool.request().query("SELECT DISTINCT Dept AS Department FROM EMP WHERE Dept IS NOT NULL AND Dept != '' AND ActiveFlag = 1 ORDER BY Dept");
 
     res.json({
       locations: locations.recordset.map((r) => r.Location),
@@ -1923,7 +1908,6 @@ app.get("/api/share-groups", requireAuth, async (req, res) => {
         ORDER BY sg.CreatedAt DESC
       `);
 
-    // Get members for each group
     const result = [];
     for (const group of groups.recordset) {
       const members = await dmsPool
@@ -1963,7 +1947,6 @@ app.post("/api/share-groups", requireAuth, async (req, res) => {
 
     const groupId = insertResult.recordset[0].Id;
 
-    // Add members
     if (members && Array.isArray(members)) {
       for (const email of members) {
         if (email && email.trim()) {
@@ -1990,7 +1973,6 @@ app.put("/api/share-groups/:id", requireAuth, async (req, res) => {
     const groupId = Number(req.params.id);
     const { name, members } = req.body;
 
-    // Verify ownership
     const group = await dmsPool.request().input("id", sql.Int, groupId).input("email", sql.NVarChar, req.user.email)
       .query("SELECT * FROM DmsShareGroups WHERE Id = @id AND CreatorEmail = @email");
     if (group.recordset.length === 0) {
@@ -2003,7 +1985,6 @@ app.put("/api/share-groups/:id", requireAuth, async (req, res) => {
     }
 
     if (members && Array.isArray(members)) {
-      // Replace all members
       await dmsPool.request().input("groupId", sql.Int, groupId)
         .query("DELETE FROM DmsShareGroupMembers WHERE GroupId = @groupId");
 
@@ -2037,11 +2018,9 @@ app.delete("/api/share-groups/:id", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Share group not found or not owned by you" });
     }
 
-    // Delete members first
     await dmsPool.request().input("groupId", sql.Int, groupId)
       .query("DELETE FROM DmsShareGroupMembers WHERE GroupId = @groupId");
 
-    // Delete group
     await dmsPool.request().input("id", sql.Int, groupId)
       .query("DELETE FROM DmsShareGroups WHERE Id = @id");
 
@@ -2063,7 +2042,6 @@ app.post("/api/public-links", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "docId is required" });
     }
 
-    // Check doc exists and user has access
     const canAccess = await checkDocAccess(Number(docId), req.user.email);
     if (!canAccess) {
       return res.status(403).json({ error: "Access denied" });
@@ -2165,7 +2143,6 @@ app.get("/api/public/view/:token", async (req, res) => {
 
     const link = linkResult.recordset[0];
 
-    // Check expiry
     if (link.ExpiresAt && new Date(link.ExpiresAt) < new Date()) {
       return res.status(410).json({ error: "Link has expired" });
     }
@@ -2176,7 +2153,6 @@ app.get("/api/public/view/:token", async (req, res) => {
 
     await logAudit("public_link_view", "public_link", link.Id, null, null, null, { token }, getIp(req));
 
-    // Serve inline, disable download/print hints via headers
     res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(link.FileName)}"`);
     res.setHeader("Content-Type", link.MimeType || "application/octet-stream");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -2199,7 +2175,6 @@ app.delete("/api/public-links/:id", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Public link not found" });
     }
 
-    // Only creator or admin can revoke
     const isAdmin = (await dmsPool.request().input("ae", sql.NVarChar, req.user.email)
       .query("SELECT Email FROM DmsAdmins WHERE Email = @ae AND Active = 1")).recordset.length > 0;
 
@@ -2220,7 +2195,7 @@ app.delete("/api/public-links/:id", requireAuth, async (req, res) => {
 
 // ─── 7I. USER MANAGEMENT (admin only) ──────────────────────────
 
-// GET /api/admin/users
+// GET /api/admin/users – FIX: use correct EMP columns with aliases
 app.get("/api/admin/users", requireAdmin, async (req, res) => {
   try {
     const { search, page = 1, pageSize = 50 } = req.query;
@@ -2233,7 +2208,7 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
 
     if (search) {
       request.input("search", sql.NVarChar, `%${search}%`);
-      whereClause += " AND (EmpName LIKE @search OR EmpEmail LIKE @search OR EmpID LIKE @search OR Department LIKE @search)";
+      whereClause += " AND (EmpName LIKE @search OR EmpEmail LIKE @search OR EmpID LIKE @search OR Dept LIKE @search)";
     }
 
     const countResult = await spotPool.request()
@@ -2244,7 +2219,7 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
     request.input("pageSz", sql.Int, pageSz);
 
     const result = await request.query(`
-      SELECT EmpID, EmpName, EmpEmail, Department, Location, ReportingManagerID
+      SELECT EmpID, EmpName, EmpEmail, Dept AS Department, EmpLocation AS Location, ManagerID AS ReportingManagerID
       FROM EMP
       WHERE ${whereClause}
       ORDER BY EmpName
@@ -2263,14 +2238,14 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/admin/users/:email
+// PATCH /api/admin/users/:email – FIX: map front-end field names to actual EMP columns
 app.patch("/api/admin/users/:email", requireAdmin, async (req, res) => {
   try {
     const email = req.params.email;
     const updates = req.body;
 
-    // This endpoint allows admin to update limited fields in the EMP table
-    // Typically used for correcting department/location assignments
+    // Map front-end names to actual EMP column names
+    const fieldMap = { Department: "Dept", Location: "EmpLocation" };
     const allowedFields = ["Department", "Location"];
     const setClauses = [];
     const request = spotPool.request();
@@ -2278,8 +2253,9 @@ app.patch("/api/admin/users/:email", requireAdmin, async (req, res) => {
 
     for (const field of allowedFields) {
       if (updates[field] !== undefined) {
-        request.input(field, sql.NVarChar, updates[field]);
-        setClauses.push(`${field} = @${field}`);
+        const realCol = fieldMap[field];
+        request.input(realCol, sql.NVarChar, updates[field]);
+        setClauses.push(`${realCol} = @${realCol}`);
       }
     }
 
@@ -2316,7 +2292,6 @@ app.post("/api/admin/admins", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "Email is required" });
     }
 
-    // Check if already exists
     const existing = await dmsPool.request().input("email", sql.NVarChar, email)
       .query("SELECT Email, Active FROM DmsAdmins WHERE Email = @email");
 
@@ -2324,7 +2299,6 @@ app.post("/api/admin/admins", requireAdmin, async (req, res) => {
       if (existing.recordset[0].Active) {
         return res.status(409).json({ error: "Admin already exists" });
       }
-      // Reactivate
       await dmsPool.request().input("email", sql.NVarChar, email).input("updatedBy", sql.NVarChar, req.user.email)
         .query("UPDATE DmsAdmins SET Active = 1, UpdatedBy = @updatedBy WHERE Email = @email");
     } else {
@@ -2468,14 +2442,12 @@ app.get("/api/analytics/approval-stats", requireAdmin, async (req, res) => {
     const rejected = (await dmsPool.request().query("SELECT COUNT(*) as c FROM DmsApprovals WHERE Status = 'rejected'")).recordset[0].c;
     const pending = (await dmsPool.request().query("SELECT COUNT(*) as c FROM DmsApprovals WHERE Status = 'pending'")).recordset[0].c;
 
-    // Average approval time (from created to action)
     const avgTime = await dmsPool.request().query(`
       SELECT AVG(DATEDIFF(HOUR, CreatedAt, ActionAt)) AS AvgHours
       FROM DmsApprovals
       WHERE Status IN ('approved', 'rejected') AND ActionAt IS NOT NULL
     `);
 
-    // By stage
     const byStage = await dmsPool.request().query(`
       SELECT Stage, Status, COUNT(*) as Count
       FROM DmsApprovals
@@ -2538,7 +2510,6 @@ app.get("/api/audit-log", requireAdmin, async (req, res) => {
 
     const whereStr = whereClauses.join(" AND ");
 
-    // Count
     const countReq = dmsPool.request();
     if (action) countReq.input("action", sql.NVarChar, action);
     if (user) countReq.input("user", sql.NVarChar, user);
@@ -2606,7 +2577,6 @@ async function boot() {
     });
   } catch (err) {
     console.error("[Server] TLS certificate error, falling back to HTTP:", err.message);
-    // Fallback to HTTP for development
     app.listen(PORT, HOST, () => {
       console.log(`DMS HTTP → http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`);
     });

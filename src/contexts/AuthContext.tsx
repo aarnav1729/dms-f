@@ -33,9 +33,34 @@ const DEV_BYPASS_AUTH = String(import.meta.env.VITE_DEV_BYPASS_AUTH || "").toLow
 const DEV_BYPASS_ADMIN = String(import.meta.env.VITE_DEV_BYPASS_ADMIN || "").toLowerCase() === "true";
 const DEV_BYPASS_EMAIL = String(import.meta.env.VITE_DEV_EMAIL || "aarnav.singh@premierenergies.com");
 
-const DIGI_LOGIN_URL = `https://digi.premierenergies.com/login?redirect=${encodeURIComponent(
-  typeof window !== "undefined" ? window.location.origin : "https://dms.premierenergies.com"
-)}&app=dms`;
+// ── Redirect loop protection ────────────────────────────────────
+// If we were redirected from digi and the session STILL fails, we must
+// not bounce back again.  We detect this with a short-lived sessionStorage
+// flag that survives the cross-domain round-trip.
+const REDIRECT_GUARD_KEY = "dms_auth_redirect_ts";
+const REDIRECT_COOLDOWN_MS = 15_000; // 15 seconds
+
+function buildDigiLoginUrl(): string {
+  return `https://digi.premierenergies.com/login?redirect=${encodeURIComponent(
+    window.location.href
+  )}&app=dms`;
+}
+
+function shouldRedirectToDigi(): boolean {
+  const last = sessionStorage.getItem(REDIRECT_GUARD_KEY);
+  if (last) {
+    const elapsed = Date.now() - Number(last);
+    if (elapsed < REDIRECT_COOLDOWN_MS) {
+      // We redirected very recently — don't loop
+      return false;
+    }
+  }
+  return true;
+}
+
+function markRedirectToDigi(): void {
+  sessionStorage.setItem(REDIRECT_GUARD_KEY, String(Date.now()));
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -43,7 +68,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   const redirectToLogin = useCallback(() => {
-    window.location.href = DIGI_LOGIN_URL;
+    if (!shouldRedirectToDigi()) {
+      // We already tried redirecting recently and came back without a valid
+      // session.  Show an error instead of looping forever.
+      setError("Session could not be established. Please clear cookies and try again, or visit digi.premierenergies.com directly.");
+      setLoading(false);
+      return;
+    }
+    markRedirectToDigi();
+    window.location.href = buildDigiLoginUrl();
   }, []);
 
   const fetchSession = useCallback(async () => {
@@ -74,37 +107,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
 
       if (res.status === 401) {
-        // SSO cookie missing or expired - try refresh first
-        const refreshRes = await fetch("/auth/refresh", {
-          method: "POST",
-          credentials: "include",
-        });
-
-        if (refreshRes.ok) {
-          // Retry session after refresh
-          const retryRes = await fetch("/api/session", {
-            method: "GET",
-            credentials: "include",
-          });
-
-          if (retryRes.ok) {
-            const data = await retryRes.json();
-            setUser({
-              email: data.email,
-              empId: data.empId,
-              empName: data.empName,
-              department: data.department,
-              location: data.location,
-              reportingManager: data.reportingManagerName || data.reportingManagerEmail || data.reportingManagerId || null,
-              reportingManagerEmail: data.reportingManagerEmail || null,
-              reportingManagerName: data.reportingManagerName || null,
-              isAdmin: Boolean(data.isAdmin),
-            });
-            return;
-          }
-        }
-
-        // Both session and refresh failed - redirect to DIGI login
+        // SSO cookie missing or expired.
+        //
+        // DMS does NOT have its own /auth/refresh endpoint – tokens are
+        // issued exclusively by digi.premierenergies.com.  The only way
+        // to get a fresh token is to redirect there; digi will auto-login
+        // via its own refresh cookie and bounce back with a new sso cookie.
         redirectToLogin();
         return;
       }
@@ -114,6 +122,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const data = await res.json();
+
+      // Session succeeded – clear any redirect guard so future 401s can
+      // redirect normally.
+      sessionStorage.removeItem(REDIRECT_GUARD_KEY);
+
       setUser({
         email: data.email,
         empId: data.empId,
@@ -151,9 +164,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .catch(() => {})
       .finally(() => {
         setUser(null);
+        // On logout, always allow redirect (clear guard)
+        sessionStorage.removeItem(REDIRECT_GUARD_KEY);
         redirectToLogin();
       });
-  }, [redirectToLogin]);
+  }, [redirectToLogin, fetchSession]);
 
   return (
     <AuthContext.Provider
