@@ -518,8 +518,8 @@ async function getEmpContextByEmail(email) {
         EmpEmail,
         EmpName,
         EmpID,
-        COALESCE(Dept, Department, '') AS Department,
-        COALESCE(EmpLocation, Location, '') AS Location
+        ISNULL(Dept, '') AS Department,
+        ISNULL(EmpLocation, '') AS Location
       FROM EMP
       WHERE EmpEmail = @email
     `);
@@ -545,8 +545,8 @@ async function getScopeUsers(scope, groupId, actorEmail) {
     const members = await dmsPool.request().input("gid", sql.Int, Number(groupId || 0))
       .query(`
         SELECT e.EmpEmail, e.EmpName, e.EmpID,
-               COALESCE(e.Dept, e.Department, '') AS Department,
-               COALESCE(e.EmpLocation, e.Location, '') AS Location
+               ISNULL(e.Dept, '') AS Department,
+               ISNULL(e.EmpLocation, '') AS Location
         FROM DmsShareGroupMembers gm
         LEFT JOIN EMP e ON e.EmpEmail = gm.Email
         WHERE gm.GroupId = @gid
@@ -561,10 +561,10 @@ async function getScopeUsers(scope, groupId, actorEmail) {
     const deptUsers = await spotPool.request().input("dept", sql.NVarChar, dept)
       .query(`
         SELECT EmpEmail, EmpName, EmpID,
-               COALESCE(Dept, Department, '') AS Department,
-               COALESCE(EmpLocation, Location, '') AS Location
+               ISNULL(Dept, '') AS Department,
+               ISNULL(EmpLocation, '') AS Location
         FROM EMP
-        WHERE ActiveFlag = 1 AND COALESCE(Dept, Department, '') = @dept
+        WHERE ActiveFlag = 1 AND ISNULL(Dept, '') = @dept
       `);
     return deptUsers.recordset.filter((x) => x.EmpEmail);
   }
@@ -572,8 +572,8 @@ async function getScopeUsers(scope, groupId, actorEmail) {
   if (normalizedScope === "company") {
     const all = await spotPool.request().query(`
       SELECT EmpEmail, EmpName, EmpID,
-             COALESCE(Dept, Department, '') AS Department,
-             COALESCE(EmpLocation, Location, '') AS Location
+             ISNULL(Dept, '') AS Department,
+             ISNULL(EmpLocation, '') AS Location
       FROM EMP
       WHERE ActiveFlag = 1 AND EmpEmail IS NOT NULL AND EmpEmail LIKE '%@premierenergies.com'
     `);
