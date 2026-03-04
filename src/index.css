@@ -1,0 +1,132 @@
+@import url("https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 210 25% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 210 25% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 210 25% 10%;
+    --primary: 207 100% 30%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 15% 93%;
+    --secondary-foreground: 210 20% 30%;
+    --muted: 210 15% 90%;
+    --muted-foreground: 210 10% 45%;
+    --accent: 88 65% 40%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 210 15% 88%;
+    --input: 210 15% 88%;
+    --ring: 207 100% 30%;
+    --radius: 0.5rem;
+    --spotlight-x: 50%;
+    --spotlight-y: 35%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+/* Global Spotlight Effect */
+.global-spotlight {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      420px circle at var(--spotlight-x) var(--spotlight-y),
+      hsla(198, 88%, 52%, 0.10) 0%,
+      hsla(198, 88%, 52%, 0.04) 34%,
+      transparent 70%
+    ),
+    radial-gradient(
+      360px circle at calc(var(--spotlight-x) + 10%) calc(var(--spotlight-y) - 12%),
+      hsla(22, 86%, 55%, 0.05) 0%,
+      transparent 68%
+    );
+}
+
+/* Background decorative gradients */
+.bg-page-gradient {
+  background: linear-gradient(to bottom, #f3f8fc, #faf9f4, hsl(var(--background)));
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f3f5f7;
+}
+::-webkit-scrollbar-thumb {
+  background: #bec7cf;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #005499;
+}
+
+/* Glass effect */
+.glass {
+  background: hsl(var(--card) / 0.55);
+  backdrop-filter: blur(40px);
+  border: 1px solid hsl(var(--border) / 0.70);
+}
+
+/* Grid pattern overlay */
+.grid-pattern {
+  background-image:
+    linear-gradient(to right, hsl(var(--foreground)) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(var(--foreground)) 1px, transparent 1px);
+  background-size: 64px 64px;
+  opacity: 0.04;
+}
+
+/* Tamper proof stamp */
+.controlled-stamp {
+  border: 3px solid hsl(var(--primary));
+  position: relative;
+}
+.controlled-stamp::after {
+  content: "CONTROLLED COPY";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: hsl(var(--primary));
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* Public link no-print */
+@media print {
+  .no-print-view * {
+    display: none !important;
+  }
+  .no-print-view::after {
+    content: "Printing is disabled for this document.";
+    display: block;
+    font-size: 24px;
+    text-align: center;
+    padding: 100px;
+  }
+}
