@@ -520,7 +520,7 @@ async function getEmpContextByEmail(email) {
         EmpID,
         ISNULL(Dept, '') AS Department,
         ISNULL(EmpLocation, '') AS Location
-      FROM EMP
+      FROM dbo.EMP
       WHERE EmpEmail = @email
     `);
   return result.recordset[0] || null;
@@ -543,15 +543,25 @@ async function getScopeUsers(scope, groupId, actorEmail) {
 
   if (normalizedScope === "group") {
     const members = await dmsPool.request().input("gid", sql.Int, Number(groupId || 0))
-      .query(`
-        SELECT e.EmpEmail, e.EmpName, e.EmpID,
-               ISNULL(e.Dept, '') AS Department,
-               ISNULL(e.EmpLocation, '') AS Location
-        FROM DmsShareGroupMembers gm
-        LEFT JOIN EMP e ON e.EmpEmail = gm.Email
-        WHERE gm.GroupId = @gid
-      `);
-    return members.recordset.filter((x) => x.EmpEmail);
+      .query("SELECT Email FROM DmsShareGroupMembers WHERE GroupId = @gid");
+    const emails = members.recordset
+      .map((x) => String(x.Email || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (!emails.length) return [];
+
+    const users = [];
+    for (const email of emails) {
+      const ctx = await getEmpContextByEmail(email);
+      if (!ctx) continue;
+      users.push({
+        EmpEmail: ctx.EmpEmail || email,
+        EmpName: ctx.EmpName || email,
+        EmpID: ctx.EmpID || null,
+        Department: ctx.Department || "",
+        Location: ctx.Location || "",
+      });
+    }
+    return users;
   }
 
   if (normalizedScope === "department") {
@@ -563,7 +573,7 @@ async function getScopeUsers(scope, groupId, actorEmail) {
         SELECT EmpEmail, EmpName, EmpID,
                ISNULL(Dept, '') AS Department,
                ISNULL(EmpLocation, '') AS Location
-        FROM EMP
+        FROM dbo.EMP
         WHERE ActiveFlag = 1 AND ISNULL(Dept, '') = @dept
       `);
     return deptUsers.recordset.filter((x) => x.EmpEmail);
@@ -574,7 +584,7 @@ async function getScopeUsers(scope, groupId, actorEmail) {
       SELECT EmpEmail, EmpName, EmpID,
              ISNULL(Dept, '') AS Department,
              ISNULL(EmpLocation, '') AS Location
-      FROM EMP
+      FROM dbo.EMP
       WHERE ActiveFlag = 1 AND EmpEmail IS NOT NULL AND EmpEmail LIKE '%@premierenergies.com'
     `);
     return all.recordset.filter((x) => x.EmpEmail);
@@ -664,8 +674,8 @@ app.get("/api/session", requireAuth, async (req, res) => {
           e.*,
           rm.EmpEmail AS ReportingManagerEmail,
           rm.EmpName AS ReportingManagerName
-        FROM EMP e
-        LEFT JOIN EMP rm ON rm.EmpID = e.ManagerID
+        FROM dbo.EMP e
+        LEFT JOIN dbo.EMP rm ON rm.EmpID = e.ManagerID
         WHERE e.EmpEmail = @email
       `);
 
@@ -700,7 +710,7 @@ app.get("/api/profile", requireAuth, async (req, res) => {
     const empResult = await spotPool
       .request()
       .input("email", sql.NVarChar, email)
-      .query("SELECT * FROM EMP WHERE EmpEmail = @email");
+      .query("SELECT * FROM dbo.EMP WHERE EmpEmail = @email");
 
     if (empResult.recordset.length === 0) {
       return res.status(404).json({ error: "Employee not found" });
@@ -725,7 +735,7 @@ app.get("/api/employees/search", requireAuth, async (req, res) => {
       .input("q", sql.NVarChar, `%${qRaw}%`)
       .query(`
         SELECT TOP 30 EmpID, EmpName, EmpEmail, Dept AS Department, EmpLocation AS Location
-        FROM EMP
+        FROM dbo.EMP
         WHERE (
           EmpName LIKE @q
           OR EmpEmail LIKE @q
@@ -765,7 +775,7 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
     const empResult = await spotPool
       .request()
       .input("email", sql.NVarChar, req.user.email)
-      .query("SELECT TOP 1 EmpID, EmpName, Dept, EmpLocation, ManagerID FROM EMP WHERE EmpEmail = @email");
+      .query("SELECT TOP 1 EmpID, EmpName, Dept, EmpLocation, ManagerID FROM dbo.EMP WHERE EmpEmail = @email");
     const emp = empResult.recordset[0] || {};
 
     const status = controlled ? "pending_approval" : "active";
@@ -872,7 +882,7 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       const rmResult = await spotPool
         .request()
         .input("rmId", sql.NVarChar, emp.ManagerID)
-        .query("SELECT TOP 1 EmpEmail, EmpName FROM EMP WHERE EmpID = @rmId");
+        .query("SELECT TOP 1 EmpEmail, EmpName FROM dbo.EMP WHERE EmpID = @rmId");
 
       if (rmResult.recordset.length > 0) {
         const rmEmail = rmResult.recordset[0].EmpEmail;
@@ -939,7 +949,7 @@ app.get("/api/documents", requireAuth, async (req, res) => {
       const empCheck = await spotPool
         .request()
         .input("eEmail", sql.NVarChar, req.user.email)
-        .query("SELECT TOP 1 Dept, EmpLocation FROM EMP WHERE EmpEmail = @eEmail");
+        .query("SELECT TOP 1 Dept, EmpLocation FROM dbo.EMP WHERE EmpEmail = @eEmail");
       const userDept = empCheck.recordset[0]?.Dept || "";
       const userLoc = empCheck.recordset[0]?.EmpLocation || "";
 
@@ -1030,8 +1040,8 @@ app.get("/api/documents", requireAuth, async (req, res) => {
       .input("creator", sql.NVarChar, creator || null)
       .input("version", sql.Int, version ? Number(version) : null)
       .input("approver", sql.NVarChar, approver || null)
-      .input("userDept", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail2", sql.NVarChar, req.user.email).query("SELECT TOP 1 Dept FROM EMP WHERE EmpEmail = @eEmail2")).recordset[0]?.Dept || ""))
-      .input("userLoc", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail3", sql.NVarChar, req.user.email).query("SELECT TOP 1 EmpLocation FROM EMP WHERE EmpEmail = @eEmail3")).recordset[0]?.EmpLocation || ""))
+      .input("userDept", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail2", sql.NVarChar, req.user.email).query("SELECT TOP 1 Dept FROM dbo.EMP WHERE EmpEmail = @eEmail2")).recordset[0]?.Dept || ""))
+      .input("userLoc", sql.NVarChar, isAdmin ? null : ((await spotPool.request().input("eEmail3", sql.NVarChar, req.user.email).query("SELECT TOP 1 EmpLocation FROM dbo.EMP WHERE EmpEmail = @eEmail3")).recordset[0]?.EmpLocation || ""))
       .query(`SELECT COUNT(*) as total FROM DmsDocuments d WHERE ${whereStr}`);
 
     const total = countResult.recordset[0].total;
@@ -1091,7 +1101,7 @@ app.get("/api/documents/:id", requireAuth, async (req, res) => {
         if (doc.ShareScope === "department") {
           // FIX: use correct EMP column
           const userDept = (await spotPool.request().input("ue2", sql.NVarChar, req.user.email)
-            .query("SELECT TOP 1 Dept FROM EMP WHERE EmpEmail = @ue2")).recordset[0]?.Dept;
+            .query("SELECT TOP 1 Dept FROM dbo.EMP WHERE EmpEmail = @ue2")).recordset[0]?.Dept;
           if (userDept !== doc.Department) {
             return res.status(403).json({ error: "Access denied" });
           }
@@ -1384,7 +1394,7 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
     const empResult = await spotPool
       .request()
       .input("email", sql.NVarChar, req.user.email)
-      .query("SELECT TOP 1 EmpID, EmpName, Dept, EmpLocation, ManagerID FROM EMP WHERE EmpEmail = @email");
+      .query("SELECT TOP 1 EmpID, EmpName, Dept, EmpLocation, ManagerID FROM dbo.EMP WHERE EmpEmail = @email");
     const emp = empResult.recordset[0] || {};
 
     const metadataText = typeof metadata === "string" ? metadata : JSON.stringify(metadata || {});
@@ -1458,7 +1468,7 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
       const rmResult = await spotPool
         .request()
         .input("rmId", sql.NVarChar, emp.ManagerID)
-        .query("SELECT TOP 1 EmpEmail, EmpName FROM EMP WHERE EmpID = @rmId");
+        .query("SELECT TOP 1 EmpEmail, EmpName FROM dbo.EMP WHERE EmpID = @rmId");
 
       if (rmResult.recordset.length > 0) {
         const rmEmail = rmResult.recordset[0].EmpEmail;
@@ -1909,7 +1919,7 @@ async function checkDocAccess(docId, email) {
 
     if (doc.ShareScope === "department") {
       const userDept = (await spotPool.request().input("ue2", sql.NVarChar, email)
-        .query("SELECT TOP 1 Dept FROM EMP WHERE EmpEmail = @ue2")).recordset[0]?.Dept;
+        .query("SELECT TOP 1 Dept FROM dbo.EMP WHERE EmpEmail = @ue2")).recordset[0]?.Dept;
       if (userDept === doc.Department) return true;
     }
 
@@ -2056,8 +2066,8 @@ app.delete("/api/hods/:id", requireAdmin, async (req, res) => {
 // GET /api/hods/locations-departments – FIX: use correct EMP columns
 app.get("/api/hods/locations-departments", requireAdmin, async (req, res) => {
   try {
-    const locations = await spotPool.request().query("SELECT DISTINCT EmpLocation AS Location FROM EMP WHERE EmpLocation IS NOT NULL AND EmpLocation != '' AND ActiveFlag = 1 ORDER BY EmpLocation");
-    const departments = await spotPool.request().query("SELECT DISTINCT Dept AS Department FROM EMP WHERE Dept IS NOT NULL AND Dept != '' AND ActiveFlag = 1 ORDER BY Dept");
+    const locations = await spotPool.request().query("SELECT DISTINCT EmpLocation AS Location FROM dbo.EMP WHERE EmpLocation IS NOT NULL AND EmpLocation != '' AND ActiveFlag = 1 ORDER BY EmpLocation");
+    const departments = await spotPool.request().query("SELECT DISTINCT Dept AS Department FROM dbo.EMP WHERE Dept IS NOT NULL AND Dept != '' AND ActiveFlag = 1 ORDER BY Dept");
 
     res.json({
       locations: locations.recordset.map((r) => r.Location),
@@ -2087,7 +2097,7 @@ app.get("/api/hods/combinations", requireAdmin, async (req, res) => {
 
     const result = await rq.query(`
       SELECT DISTINCT EmpLocation AS Location, Dept AS Department
-      FROM EMP
+      FROM dbo.EMP
       ${where}
       ORDER BY EmpLocation, Dept
     `);
@@ -2458,14 +2468,14 @@ app.get("/api/admin/users", requireAdmin, async (req, res) => {
 
     const countResult = await spotPool.request()
       .input("search", sql.NVarChar, search ? `%${search}%` : null)
-      .query(`SELECT COUNT(*) as total FROM EMP WHERE ${whereClause}`);
+      .query(`SELECT COUNT(*) as total FROM dbo.EMP WHERE ${whereClause}`);
 
     request.input("offset", sql.Int, offset);
     request.input("pageSz", sql.Int, pageSz);
 
     const result = await request.query(`
       SELECT EmpID, EmpName, EmpEmail, Dept AS Department, EmpLocation AS Location, ManagerID AS ReportingManagerID
-      FROM EMP
+      FROM dbo.EMP
       WHERE ${whereClause}
       ORDER BY EmpName
       OFFSET @offset ROWS FETCH NEXT @pageSz ROWS ONLY
@@ -2508,7 +2518,7 @@ app.patch("/api/admin/users/:email", requireAdmin, async (req, res) => {
       return res.status(400).json({ error: "No valid fields to update" });
     }
 
-    await request.query(`UPDATE EMP SET ${setClauses.join(", ")} WHERE EmpEmail = @email`);
+    await request.query(`UPDATE dbo.EMP SET ${setClauses.join(", ")} WHERE EmpEmail = @email`);
 
     await logAudit("admin_user_update", "user", null, req.user.email, null, { email }, updates, getIp(req));
     res.json({ success: true });
@@ -2533,7 +2543,7 @@ app.post("/api/admin/users", requireAdmin, async (req, res) => {
     if (!EmpEmail) return res.status(400).json({ error: "EmpEmail is required" });
 
     const exists = await spotPool.request().input("email", sql.NVarChar, EmpEmail)
-      .query("SELECT TOP 1 EmpEmail FROM EMP WHERE EmpEmail = @email");
+      .query("SELECT TOP 1 EmpEmail FROM dbo.EMP WHERE EmpEmail = @email");
     if (exists.recordset.length) {
       return res.status(409).json({ error: "User already exists" });
     }
@@ -2556,7 +2566,7 @@ app.post("/api/admin/users", requireAdmin, async (req, res) => {
       else rq.input(k, sql.NVarChar(sql.MAX), String(v));
     }
 
-    await rq.query(`INSERT INTO EMP (${cols.join(",")}) VALUES (${params.join(",")})`);
+    await rq.query(`INSERT INTO dbo.EMP (${cols.join(",")}) VALUES (${params.join(",")})`);
     await logAudit("admin_user_create", "user", null, req.user.email, null, null, values, getIp(req));
     res.json({ success: true });
   } catch (err) {
@@ -2572,11 +2582,11 @@ app.delete("/api/admin/users/:email", requireAdmin, async (req, res) => {
     if (!email) return res.status(400).json({ error: "email_required" });
 
     const existing = await spotPool.request().input("email", sql.NVarChar, email)
-      .query("SELECT TOP 1 * FROM EMP WHERE EmpEmail = @email");
+      .query("SELECT TOP 1 * FROM dbo.EMP WHERE EmpEmail = @email");
     if (!existing.recordset.length) return res.status(404).json({ error: "User not found" });
 
     await spotPool.request().input("email", sql.NVarChar, email)
-      .query("UPDATE EMP SET ActiveFlag = 0 WHERE EmpEmail = @email");
+      .query("UPDATE dbo.EMP SET ActiveFlag = 0 WHERE EmpEmail = @email");
 
     await logAudit(
       "admin_user_delete",
@@ -2669,7 +2679,7 @@ app.get("/api/analytics/overview", requireAdmin, async (req, res) => {
     const controlledDocs = (await dmsPool.request().query("SELECT COUNT(*) as c FROM DmsDocuments WHERE IsControlled = 1 AND Status != 'deleted'")).recordset[0].c;
     const pendingApprovals = (await dmsPool.request().query("SELECT COUNT(*) as c FROM DmsApprovals WHERE Status = 'pending'")).recordset[0].c;
     const approvedDocs = (await dmsPool.request().query("SELECT COUNT(*) as c FROM DmsDocuments WHERE Status = 'approved'")).recordset[0].c;
-    const totalUsers = (await spotPool.request().query("SELECT COUNT(DISTINCT EmpEmail) as c FROM EMP WHERE ActiveFlag = 1")).recordset[0].c;
+    const totalUsers = (await spotPool.request().query("SELECT COUNT(DISTINCT EmpEmail) as c FROM dbo.EMP WHERE ActiveFlag = 1")).recordset[0].c;
     const uniqueUploaders = (await dmsPool.request().query("SELECT COUNT(DISTINCT CreatorEmail) as c FROM DmsDocuments WHERE Status != 'deleted'")).recordset[0].c;
 
     res.json({
