@@ -491,10 +491,24 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
         <div className="w-full px-3 md:px-8 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <GLBLogo />
-            <div>
-              <h1 className="font-display text-3xl tracking-wide leading-none">Premier Energies DMS</h1>
-              <p className="text-xs text-muted-foreground -mt-1">Document Management System</p>
-            </div>
+          </div>
+
+          <div className="hidden lg:flex items-center gap-2 flex-1 overflow-x-auto px-2">
+            {navItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  `px-3 py-1.5 rounded-full border text-sm whitespace-nowrap transition ${
+                    isActive
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border hover:bg-card"
+                  }`
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
           </div>
 
           <div className="hidden md:flex items-center gap-2 text-xs md:text-sm">
@@ -567,12 +581,8 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
       </AnimatePresence>
 
       <main className="w-full px-3 md:px-8 py-6 relative z-10 flex-1">
-        <div className="mb-6 hidden md:flex flex-wrap gap-2">
-          {navItems.map((item) => (
-            <NavLink key={item.to} to={item.to} className="px-4 py-2 rounded-full border border-border hover:bg-card transition">
-              {item.label}
-            </NavLink>
-          ))}
+        <div className="mb-6 hidden md:flex lg:hidden flex-wrap gap-2">
+          <Button variant="outline" onClick={() => setMobileOpen(true)}>Menu</Button>
           <Button variant="outline" onClick={() => navigate("/upload")}>New Document</Button>
         </div>
         {children}
