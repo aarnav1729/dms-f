@@ -226,6 +226,122 @@ function TutorialAssistant() {
   );
 }
 
+type TourStep = {
+  route: string;
+  selector: string;
+  title: string;
+  body: string;
+};
+
+function FirstTimeTourOverlay({ isAdmin }: { isAdmin: boolean }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [index, setIndex] = useState(0);
+  const [enabled, setEnabled] = useState(false);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+
+  const steps = useMemo<TourStep[]>(
+    () => [
+      { route: "/", selector: "[data-tour='dashboard-search']", title: "Dashboard Search", body: "Find documents instantly by content, metadata, department, location, and control type." },
+      { route: "/", selector: "[data-tour='dashboard-doc-card']", title: "Document Cards", body: "Open, view inline, download, and inspect complete history and public links from each card." },
+      { route: "/upload", selector: "[data-tour='upload-controlled']", title: "Controlled Workflow", body: "Enable this when document controller approval and strict versioning are mandatory." },
+      { route: "/upload", selector: "[data-tour='upload-submit']", title: "Upload Action", body: "Upload single files or folders. Controlled uploads should include a mandatory revision reason." },
+      { route: "/approvals", selector: "[data-tour='approvals-list']", title: "Approvals Queue", body: "Approve or reject pending items by workflow stage. HOD-skipped items are visibly flagged." },
+      { route: "/verify", selector: "[data-tour='verify-panel']", title: "Copy Verification", body: "Anyone can upload a file to verify whether it matches an official controlled copy." },
+      ...(isAdmin
+        ? [
+            { route: "/admin/users", selector: "[data-tour='users-create']", title: "User CRUD", body: "Create, update, and deactivate users from the EMP-backed master. Admin management is separate." },
+            { route: "/admin/hods", selector: "[data-tour='hod-combinations']", title: "HOD Combinations", body: "Search and pick exact Location + Department combinations before assigning HOD." },
+            { route: "/admin/analytics", selector: "[data-tour='analytics-main']", title: "Analytics", body: "Track usage and drilldowns by department, location, and uploader behavior." },
+            { route: "/admin/audit", selector: "[data-tour='audit-filters']", title: "Audit Trail", body: "Filter immutable action logs with before/after states, actor, reason, and timestamp." },
+          ]
+        : []),
+    ],
+    [isAdmin]
+  );
+
+  useEffect(() => {
+    if (localStorage.getItem("dms_tour_done_v1") === "1") return;
+    const t = window.setTimeout(() => setEnabled(true), 450);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const step = steps[index];
+    if (!step) return;
+    if (location.pathname !== step.route) {
+      navigate(step.route);
+      return;
+    }
+
+    let tries = 0;
+    const maxTries = 50;
+    const timer = window.setInterval(() => {
+      const el = document.querySelector(step.selector) as HTMLElement | null;
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        const r = el.getBoundingClientRect();
+        setRect(r);
+        window.clearInterval(timer);
+      } else if (tries++ > maxTries) {
+        setRect(null);
+        window.clearInterval(timer);
+      }
+    }, 80);
+    return () => window.clearInterval(timer);
+  }, [enabled, index, location.pathname, navigate, steps]);
+
+  if (!enabled || !steps[index]) return null;
+
+  const step = steps[index];
+  const done = () => {
+    localStorage.setItem("dms_tour_done_v1", "1");
+    setEnabled(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] pointer-events-none">
+      <div className="absolute inset-0 bg-slate-950/70" />
+      {rect ? (
+        <div
+          className="absolute rounded-xl border-2 border-cyan-300/90 shadow-[0_0_0_9999px_rgba(2,6,23,0.72)] transition-all duration-300"
+          style={{
+            left: rect.left - 8,
+            top: rect.top - 8,
+            width: rect.width + 16,
+            height: rect.height + 16,
+          }}
+        />
+      ) : null}
+      <div
+        className="absolute pointer-events-auto w-[min(92vw,440px)]"
+        style={{
+          left: rect ? Math.max(12, Math.min(window.innerWidth - 452, rect.left)) : 12,
+          top: rect ? Math.min(window.innerHeight - 240, rect.bottom + 14) : 80,
+        }}
+      >
+        <Card className="glass shadow-2xl">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg">{step.title}</CardTitle>
+            <CardDescription>Step {index + 1} of {steps.length}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p>{step.body}</p>
+            <div className="flex gap-2 flex-wrap">
+              <Button size="sm" variant="outline" disabled={index === 0} onClick={() => setIndex((v) => Math.max(0, v - 1))}>Back</Button>
+              <Button size="sm" onClick={() => (index >= steps.length - 1 ? done() : setIndex((v) => v + 1))}>
+                {index >= steps.length - 1 ? "Finish Tour" : "Next"}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={done}>Skip</Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -271,7 +387,8 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: "100%", opacity: 0.9 }}
             transition={{ duration: 0.45, ease: [0.2, 0.8, 0.2, 1] }}
-            className="fixed inset-0 z-50 bg-slate-950/96 text-white"
+            className="fixed inset-0 z-50 text-white"
+            style={{ background: "linear-gradient(180deg, #050b18 0%, #0a1530 55%, #0f1f3f 100%)", color: "#ffffff" }}
           >
             <div className="h-full w-full p-6 flex flex-col">
               <div className="flex items-center justify-between mb-8">
@@ -295,7 +412,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
                     <NavLink
                       to={item.to}
                       onClick={() => setMobileOpen(false)}
-                      className="block rounded-2xl border border-white/20 px-5 py-4 text-xl hover:bg-white/10 transition"
+                      className="block rounded-2xl border border-white/35 px-5 py-4 text-xl bg-white/5 text-white hover:bg-white/15 transition"
                     >
                       {item.label}
                     </NavLink>
@@ -304,10 +421,10 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
               </div>
 
               <div className="pt-4 border-t border-white/20 space-y-3">
-                <div className="text-sm text-white/70">{user?.email}</div>
+                <div className="text-sm text-white/80">{user?.email}</div>
                 <div className="flex gap-2">
-                  <Button className="flex-1" variant="secondary" onClick={() => { setMobileOpen(false); navigate("/upload"); }}>New Document</Button>
-                  <Button className="flex-1" variant="ghost" onClick={logout}>Logout</Button>
+                  <Button className="flex-1 !bg-white !text-slate-900 hover:!bg-white/90" onClick={() => { setMobileOpen(false); navigate("/upload"); }}>New Document</Button>
+                  <Button className="flex-1 !text-white !border !border-white/40 hover:!bg-white/10" variant="ghost" onClick={logout}>Logout</Button>
                 </div>
               </div>
             </div>
@@ -335,11 +452,13 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
       </footer>
 
       <TutorialAssistant />
+      <FirstTimeTourOverlay isAdmin={Boolean(user?.isAdmin)} />
     </div>
   );
 }
 
 function DashboardPage() {
+  const { user } = useAuth();
   const [documents, setDocuments] = useState<Doc[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -364,15 +483,19 @@ function DashboardPage() {
       setTotal(data.total || 0);
     } catch (error) {
       console.error(error);
-      alert("Failed to load documents");
+      const msg = String((error as Error)?.message || "");
+      if (!msg.includes("401") && !msg.toLowerCase().includes("unauth")) {
+        console.warn("Document load deferred/failed:", msg);
+      }
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    if (!user?.email) return;
     fetchDocs();
-  }, []);
+  }, [user?.email]);
 
   const openDoc = async (doc: Doc) => {
     setSelected(doc);
@@ -386,7 +509,7 @@ function DashboardPage() {
 
   return (
     <div className="space-y-4 animate-fade-in">
-      <Card className="glass">
+      <Card className="glass" data-tour="dashboard-search">
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><Search className="h-5 w-5" />Search & Advanced Filters</CardTitle>
           <CardDescription>Search metadata, content, title, creator, location and document controller flow status.</CardDescription>
@@ -422,7 +545,7 @@ function DashboardPage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.03 }}
           >
-            <Card className="glass hover:shadow-xl hover:-translate-y-1 transition-all duration-300">
+            <Card className="glass hover:shadow-xl hover:-translate-y-1 transition-all duration-300" data-tour={index === 0 ? "dashboard-doc-card" : undefined}>
               <CardContent className="pt-6 space-y-2">
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -625,7 +748,7 @@ function UploadPage() {
             <textarea value={metadata} onChange={(e) => setMetadata(e.target.value)} className="w-full h-24 rounded-md border bg-background p-3 text-sm font-mono" />
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" data-tour="upload-controlled">
             <Checkbox checked={isControlled} onCheckedChange={(v) => setIsControlled(Boolean(v))} id="controlled" />
             <Label htmlFor="controlled">Requires Document Controller Approval</Label>
           </div>
@@ -676,7 +799,7 @@ function UploadPage() {
           </div>
 
           <div className="flex gap-2 flex-wrap">
-            <Button onClick={submit} disabled={saving}>{saving ? "Uploading..." : "Upload"}</Button>
+            <Button onClick={submit} disabled={saving} data-tour="upload-submit">{saving ? "Uploading..." : "Upload"}</Button>
             <CreateGroupInline onSaved={() => api<any[]>("/api/share-groups").then(setGroups).catch(() => setGroups([]))} />
           </div>
         </CardContent>
@@ -777,7 +900,7 @@ function ApprovalsPage() {
   };
 
   return (
-    <div className="space-y-3 animate-fade-in">
+    <div className="space-y-3 animate-fade-in" data-tour="approvals-list">
       {pending.length === 0 ? <Card><CardContent className="pt-6">No pending approvals.</CardContent></Card> : null}
       {pending.map((p) => (
         <Card key={p.Id} className="glass">
@@ -822,7 +945,7 @@ function VerifyPage() {
   };
 
   return (
-    <Card className="glass animate-fade-in">
+    <Card className="glass animate-fade-in" data-tour="verify-panel">
       <CardHeader>
         <CardTitle className="flex items-center gap-2"><FileCheck2 className="h-5 w-5" />Controlled Copy Verification</CardTitle>
         <CardDescription>Accessible to all users. Upload a file and confirm whether it matches a controlled official copy.</CardDescription>
@@ -918,7 +1041,7 @@ function AdminUsersPage() {
 
   return (
     <div className="space-y-4 animate-fade-in">
-      <Card className="glass">
+      <Card className="glass" data-tour="users-create">
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><UserPlus2 className="h-5 w-5" />Create User</CardTitle>
         </CardHeader>
@@ -1037,7 +1160,7 @@ function HodsPage() {
 
   return (
     <div className="grid xl:grid-cols-3 gap-4 animate-fade-in">
-      <Card className="glass xl:col-span-2">
+      <Card className="glass xl:col-span-2" data-tour="hod-combinations">
         <CardHeader>
           <CardTitle>HOD Matrix Master</CardTitle>
           <CardDescription>Pick exact Location + Department combinations first, then assign HOD.</CardDescription>
@@ -1086,7 +1209,7 @@ function HodsPage() {
         </CardContent>
       </Card>
 
-      <Card className="glass">
+      <Card className="glass" data-tour="analytics-main">
         <CardHeader><CardTitle>Configured HODs</CardTitle></CardHeader>
         <CardContent className="max-h-[560px] overflow-auto">
           {list.map((r) => (
@@ -1231,7 +1354,7 @@ function AuditPage() {
         <CardDescription>Timestamp, actor, action, reason, before state, after state and commit trail.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid md:grid-cols-3 gap-2">
+        <div className="grid md:grid-cols-3 gap-2" data-tour="audit-filters">
           <Input placeholder="Action" value={action} onChange={(e) => setAction(e.target.value)} />
           <Input placeholder="User email" value={user} onChange={(e) => setUser(e.target.value)} />
           <Button onClick={load}>Filter</Button>
@@ -1324,9 +1447,10 @@ function AdminGate({ children }: { children: React.ReactNode }) {
 }
 
 function AuthenticatedApp() {
-  const { loading, error } = useAuth();
+  const { loading, error, user } = useAuth();
   if (loading) return <LoadingScreen />;
   if (error) return <LoadingScreen />;
+  if (!user) return <LoadingScreen />;
 
   return (
     <ProtectedLayout>
