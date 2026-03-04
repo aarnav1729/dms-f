@@ -1334,15 +1334,8 @@ app.get("/api/documents/:id/view", requireAuth, async (req, res) => {
     }
     const accessType = await getEffectiveAccessType(docId, req.user.email);
     const isViewOnly = accessType === "view_only";
-    const fetchDest = String(req.get("sec-fetch-dest") || "").toLowerCase();
     const embedMode = String(req.query.embed || "").trim() === "1";
-    // Prevent view-only users from opening raw file in a top-level browser tab/window.
-    if (isViewOnly && !embedMode && (fetchDest === "" || fetchDest === "document")) {
-      return res.status(403).json({
-        error: "view_only_inline_required",
-        message: "View-only documents can only be opened inside the DMS inline viewer.",
-      });
-    }
+    const rawMode = String(req.query.raw || "").trim() === "1";
 
     if (!fs.existsSync(doc.FilePath)) {
       return res.status(404).json({ error: "File not found on disk" });
@@ -1350,13 +1343,70 @@ app.get("/api/documents/:id/view", requireAuth, async (req, res) => {
 
     await logAudit("document_view_file", "document", docId, req.user.email, null, null, null, getIp(req));
 
+    if (isViewOnly) {
+      const isPdf = String(doc.MimeType || "").toLowerCase().includes("pdf");
+      if (rawMode) {
+        const inlineHeader = String(req.get("x-dms-inline") || "").trim();
+        if (!embedMode || inlineHeader !== "1") {
+          return res.status(403).json({ error: "raw_view_blocked_for_view_only" });
+        }
+        res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.FileName)}"`);
+        res.setHeader("Content-Type", doc.MimeType || "application/octet-stream");
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        return fs.createReadStream(doc.FilePath).pipe(res);
+      }
+
+      if (!isPdf) {
+        return res.status(415).json({
+          error: "preview_not_supported_for_view_only",
+          message: "Inline preview is only available for PDF in view-only mode.",
+        });
+      }
+
+      const html = `<!doctype html>
+<html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Secure Viewer</title>
+<style>
+html,body{margin:0;padding:0;background:#0b1220;color:#f8fafc;font-family:Arial,sans-serif}
+.top{position:sticky;top:0;padding:10px 14px;background:#111827;border-bottom:1px solid rgba(255,255,255,.15);font-size:12px}
+#pages{padding:12px;display:flex;flex-direction:column;gap:12px;align-items:center}
+canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);background:white}
+</style></head><body>
+<div class="top">View-only secure preview. Print and download are disabled.</div>
+<div id="pages"></div>
+<script type="module">
+  import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs";
+  document.addEventListener("contextmenu", (e)=>e.preventDefault());
+  document.addEventListener("keydown", (e)=>{ if((e.ctrlKey||e.metaKey)&&["p","s","c"].includes(e.key.toLowerCase())) e.preventDefault(); });
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs";
+  const r = await fetch("/api/documents/${docId}/view?embed=1&raw=1", { credentials: "include", headers: { "x-dms-inline": "1" }});
+  if (!r.ok) throw new Error("Unable to load document");
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  const pdf = await pdfjsLib.getDocument({ data: bytes, disableAutoFetch: true, disableStream: true }).promise;
+  const wrap = document.getElementById("pages");
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 1.5 });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    wrap.appendChild(canvas);
+  }
+</script></body></html>`;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+      res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self'");
+      return res.send(html);
+    }
+
     res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.FileName)}"`);
     res.setHeader("Content-Type", doc.MimeType || "application/octet-stream");
     res.setHeader("Cache-Control", "no-store");
-    if (isViewOnly) {
-      res.setHeader("X-Frame-Options", "SAMEORIGIN");
-      res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
-    }
     fs.createReadStream(doc.FilePath).pipe(res);
   } catch (err) {
     console.error("[View] error:", err.message);
