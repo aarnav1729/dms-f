@@ -1124,6 +1124,7 @@ function HodsPage() {
   const [location, setLocation] = useState("");
   const [department, setDepartment] = useState("");
   const [hodEmail, setHodEmail] = useState("");
+  const [editingId, setEditingId] = useState<number | null>(null);
 
   const [combos, setCombos] = useState<{ Location: string; Department: string }[]>([]);
   const [comboLocationSearch, setComboLocationSearch] = useState("");
@@ -1151,14 +1152,43 @@ function HodsPage() {
   }, [comboLocationSearch, comboDepartmentSearch]);
 
   const save = async () => {
-    await api("/api/hods", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ location, department, hodEmail, hodName: "" }),
-    });
+    if (editingId) {
+      await api(`/api/hods/${editingId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ location, department, hodEmail, hodName: "" }),
+      });
+    } else {
+      await api("/api/hods", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ location, department, hodEmail, hodName: "" }),
+      });
+    }
     setLocation("");
     setDepartment("");
     setHodEmail("");
+    setEditingId(null);
+    load();
+  };
+
+  const startEdit = (item: any) => {
+    setEditingId(item.Id);
+    setLocation(item.Location || "");
+    setDepartment(item.Department || "");
+    setHodEmail(item.HodEmail || "");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const remove = async (id: number) => {
+    if (!window.confirm("Deactivate this HOD mapping?")) return;
+    await api(`/api/hods/${id}`, { method: "DELETE" });
+    if (editingId === id) {
+      setEditingId(null);
+      setLocation("");
+      setDepartment("");
+      setHodEmail("");
+    }
     load();
   };
 
@@ -1209,7 +1239,22 @@ function HodsPage() {
             ))}
           </div>
           <Input placeholder="Selected HOD Email" value={hodEmail} onChange={(e) => setHodEmail(e.target.value)} />
-          <Button onClick={save}>Save Mapping</Button>
+          <div className="flex gap-2">
+            <Button onClick={save}>{editingId ? "Update Mapping" : "Save Mapping"}</Button>
+            {editingId ? (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setEditingId(null);
+                  setLocation("");
+                  setDepartment("");
+                  setHodEmail("");
+                }}
+              >
+                Cancel Edit
+              </Button>
+            ) : null}
+          </div>
         </CardContent>
       </Card>
 
@@ -1222,7 +1267,11 @@ function HodsPage() {
                 <div className="font-medium">{r.Location} / {r.Department}</div>
                 <div className="text-muted-foreground">{r.HodEmail}</div>
               </div>
-              <Badge variant={r.Active ? "success" : "secondary"}>{r.Active ? "Active" : "Inactive"}</Badge>
+              <div className="flex items-center gap-2">
+                <Badge variant={r.Active ? "success" : "secondary"}>{r.Active ? "Active" : "Inactive"}</Badge>
+                <Button size="sm" variant="outline" onClick={() => startEdit(r)}>Edit</Button>
+                <Button size="sm" variant="destructive" onClick={() => remove(r.Id)}>Delete</Button>
+              </div>
             </div>
           ))}
         </CardContent>
