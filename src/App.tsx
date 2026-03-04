@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { BrowserRouter, Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { motion } from "framer-motion";
+import { BrowserRouter, Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   BarChart,
   Bar,
@@ -15,16 +15,20 @@ import {
 } from "recharts";
 import {
   Activity,
+  BookOpen,
   CheckCircle2,
   Clock3,
   FileArchive,
   FileCheck2,
   FileUp,
   LogOut,
+  Menu,
   Search,
   ShieldCheck,
   Sparkles,
+  UserPlus2,
   Users,
+  X,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -76,8 +80,12 @@ type Employee = {
   EmpID: string;
   EmpName: string;
   EmpEmail: string;
-  Department: string;
-  Location: string;
+  Department?: string;
+  Dept?: string;
+  Location?: string;
+  EmpLocation?: string;
+  ReportingManagerID?: string;
+  ManagerID?: string;
 };
 
 const ADMIN_NAV = [
@@ -85,6 +93,13 @@ const ADMIN_NAV = [
   { to: "/admin/hods", label: "HOD Matrix" },
   { to: "/admin/analytics", label: "Analytics" },
   { to: "/admin/audit", label: "Audit" },
+];
+
+const USER_NAV = [
+  { to: "/", label: "Dashboard" },
+  { to: "/upload", label: "Upload" },
+  { to: "/approvals", label: "Approvals" },
+  { to: "/verify", label: "Verify Copy" },
 ];
 
 const BASE_REDIRECT =
@@ -133,59 +148,193 @@ function LoadingScreen() {
   );
 }
 
+function TutorialAssistant() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(() => localStorage.getItem("dms_tutorial_open") === "1");
+
+  useEffect(() => {
+    localStorage.setItem("dms_tutorial_open", open ? "1" : "0");
+  }, [open]);
+
+  const tips = useMemo(() => {
+    if (location.pathname.startsWith("/upload")) {
+      return [
+        "Choose Controlled only when workflow approvals are mandatory.",
+        "For controlled docs, enter a revision reason before upload.",
+        "Use Custom Group for targeted sharing; Department and Company are broadcast scopes.",
+      ];
+    }
+    if (location.pathname.startsWith("/admin/hods")) {
+      return [
+        "Start from Location + Department combinations list to avoid typo mismatches.",
+        "Pick HOD from employee search to keep the email valid.",
+        "Any unmapped combo skips HOD and flags Document Controller review.",
+      ];
+    }
+    if (location.pathname.startsWith("/admin/users")) {
+      return [
+        "Create users with minimum required fields first, then refine via edit.",
+        "Use search before creating to avoid duplicates.",
+        "Delete operation is soft-delete (ActiveFlag=0).",
+      ];
+    }
+    return [
+      "Use quick search with controlled filter to find documents fast.",
+      "Open a document to see timeline, links, and inline viewer in one flow.",
+      "Verify Copy page validates controlled documents by file hash.",
+    ];
+  }, [location.pathname]);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="fixed bottom-20 right-4 z-50 rounded-full px-4 py-2 bg-primary text-primary-foreground shadow-xl hover:scale-105 transition"
+      >
+        <BookOpen className="h-4 w-4 inline mr-2" />Tutorial
+      </button>
+      <AnimatePresence>
+        {open ? (
+          <motion.div
+            initial={{ opacity: 0, y: 18 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            className="fixed bottom-36 right-4 z-50 w-[min(90vw,420px)]"
+          >
+            <Card className="glass shadow-2xl">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg">Guided Mode</CardTitle>
+                <CardDescription>Suggestions based on your current page</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                {tips.map((tip, i) => (
+                  <div key={i} className="p-2 rounded-md bg-muted/50 border">{tip}</div>
+                ))}
+                <div className="flex gap-2 pt-2 flex-wrap">
+                  <Button size="sm" variant="outline" onClick={() => navigate("/upload")}>Go to Upload</Button>
+                  <Button size="sm" variant="outline" onClick={() => navigate("/verify")}>Verify Copy</Button>
+                  <Button size="sm" onClick={() => setOpen(false)}>Close</Button>
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </>
+  );
+}
+
 function ProtectedLayout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  const navItems = [...USER_NAV, ...(user?.isAdmin ? ADMIN_NAV : [])];
 
   return (
-    <div className="min-h-screen bg-page-gradient relative overflow-x-hidden">
+    <div className="min-h-screen bg-page-gradient relative overflow-x-hidden flex flex-col">
       <MouseGlow />
       <div className="grid-pattern fixed inset-0 pointer-events-none" />
+
       <header className="sticky top-0 z-40 backdrop-blur-xl border-b border-border/60 bg-background/70">
         <div className="w-full px-3 md:px-8 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="h-11 w-11 rounded-2xl bg-gradient-to-br from-sky-500 to-emerald-500 shadow-lg shadow-sky-400/30" />
+            <div className="h-11 w-11 rounded-2xl bg-gradient-to-br from-sky-500 to-emerald-500 shadow-lg shadow-sky-400/30 animate-float-gentle" />
             <div>
               <h1 className="font-display text-3xl tracking-wide leading-none">DMS</h1>
               <p className="text-xs text-muted-foreground -mt-1">Premier Energies Document Management</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-xs md:text-sm">
+
+          <div className="hidden md:flex items-center gap-2 text-xs md:text-sm">
             <Badge variant="info">{user?.department || "Department"}</Badge>
             <Badge variant="secondary">{user?.location || "Location"}</Badge>
             <Button variant="ghost" size="icon" onClick={logout} title="Logout">
               <LogOut className="h-4 w-4" />
             </Button>
           </div>
+
+          <div className="md:hidden flex items-center gap-2">
+            <Button variant="ghost" size="icon" onClick={() => setMobileOpen(true)} title="Menu">
+              <Menu className="h-5 w-5" />
+            </Button>
+          </div>
         </div>
       </header>
 
-      <main className="w-full px-3 md:px-8 py-6 relative z-10">
-        <div className="mb-6 flex flex-wrap gap-2">
-          <NavLink to="/" className="px-4 py-2 rounded-full border border-border hover:bg-card transition">Dashboard</NavLink>
-          <NavLink to="/upload" className="px-4 py-2 rounded-full border border-border hover:bg-card transition">Upload</NavLink>
-          <NavLink to="/approvals" className="px-4 py-2 rounded-full border border-border hover:bg-card transition">Approvals</NavLink>
-          <NavLink to="/verify" className="px-4 py-2 rounded-full border border-border hover:bg-card transition">Verify Copy</NavLink>
-          {user?.isAdmin && (
-            <>
-              {ADMIN_NAV.map((item) => (
-                <NavLink key={item.to} to={item.to} className="px-4 py-2 rounded-full border border-border hover:bg-card transition">
-                  {item.label}
-                </NavLink>
-              ))}
-            </>
-          )}
+      <AnimatePresence>
+        {mobileOpen ? (
+          <motion.div
+            initial={{ x: "100%", opacity: 0.7 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: "100%", opacity: 0.9 }}
+            transition={{ duration: 0.45, ease: [0.2, 0.8, 0.2, 1] }}
+            className="fixed inset-0 z-50 bg-slate-950/96 text-white"
+          >
+            <div className="h-full w-full p-6 flex flex-col">
+              <div className="flex items-center justify-between mb-8">
+                <div>
+                  <h2 className="font-display text-5xl tracking-wide">Menu</h2>
+                  <p className="text-white/70 text-sm">Navigate your DMS workspace</p>
+                </div>
+                <Button variant="ghost" size="icon" className="text-white hover:bg-white/10" onClick={() => setMobileOpen(false)}>
+                  <X className="h-6 w-6" />
+                </Button>
+              </div>
+
+              <div className="flex-1 space-y-2 overflow-auto">
+                {navItems.map((item, idx) => (
+                  <motion.div
+                    key={item.to}
+                    initial={{ opacity: 0, y: 16 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: idx * 0.06 }}
+                  >
+                    <NavLink
+                      to={item.to}
+                      onClick={() => setMobileOpen(false)}
+                      className="block rounded-2xl border border-white/20 px-5 py-4 text-xl hover:bg-white/10 transition"
+                    >
+                      {item.label}
+                    </NavLink>
+                  </motion.div>
+                ))}
+              </div>
+
+              <div className="pt-4 border-t border-white/20 space-y-3">
+                <div className="text-sm text-white/70">{user?.email}</div>
+                <div className="flex gap-2">
+                  <Button className="flex-1" variant="secondary" onClick={() => { setMobileOpen(false); navigate("/upload"); }}>New Document</Button>
+                  <Button className="flex-1" variant="ghost" onClick={logout}>Logout</Button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
+      <main className="w-full px-3 md:px-8 py-6 relative z-10 flex-1">
+        <div className="mb-6 hidden md:flex flex-wrap gap-2">
+          {navItems.map((item) => (
+            <NavLink key={item.to} to={item.to} className="px-4 py-2 rounded-full border border-border hover:bg-card transition">
+              {item.label}
+            </NavLink>
+          ))}
           <Button variant="outline" onClick={() => navigate("/upload")}>New Document</Button>
         </div>
         {children}
       </main>
 
-      <footer className="border-t border-border/60 bg-background/70 backdrop-blur-xl mt-8">
+      <footer className="mt-auto border-t border-border/60 bg-background/80 backdrop-blur-xl sticky bottom-0">
         <div className="w-full px-3 md:px-8 py-4 text-xs text-muted-foreground flex justify-between">
           <span>Secure DMS Platform</span>
           <span>Copyright {new Date().getFullYear()} Premier Energies</span>
         </div>
       </footer>
+
+      <TutorialAssistant />
     </div>
   );
 }
@@ -288,7 +437,7 @@ function DashboardPage() {
                   {doc.HodSkipped ? <Badge variant="warning">HOD Skipped</Badge> : null}
                 </div>
                 <p className="text-sm text-muted-foreground line-clamp-2">{doc.Description || "No description"}</p>
-                <div className="flex gap-2 pt-1">
+                <div className="flex gap-2 pt-1 flex-wrap">
                   <Button variant="outline" onClick={() => openDoc(doc)}>Open</Button>
                   <a href={`/api/documents/${doc.Id}/view`} target="_blank" rel="noreferrer" className="inline-flex">
                     <Button variant="secondary">Inline View</Button>
@@ -526,7 +675,7 @@ function UploadPage() {
             </div>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Button onClick={submit} disabled={saving}>{saving ? "Uploading..." : "Upload"}</Button>
             <CreateGroupInline onSaved={() => api<any[]>("/api/share-groups").then(setGroups).catch(() => setGroups([]))} />
           </div>
@@ -576,7 +725,7 @@ function CreateGroupInline({ onSaved }: { onSaved: () => void }) {
   };
 
   return (
-    <Card className="w-full">
+    <Card className="w-full md:w-auto">
       <CardContent className="pt-4 space-y-2">
         <Label>Create Custom Group</Label>
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Group name" />
@@ -648,7 +797,7 @@ function ApprovalsPage() {
               value={comments[p.Id] || ""}
               onChange={(e) => setComments((prev) => ({ ...prev, [p.Id]: e.target.value }))}
             />
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <Button onClick={() => decide(p.Id, "approve")}>Approve</Button>
               <Button variant="destructive" onClick={() => decide(p.Id, "reject")}>Reject</Button>
               <a href={`/api/documents/${p.DocId}/view`} target="_blank" rel="noreferrer"><Button variant="outline">View</Button></a>
@@ -694,14 +843,26 @@ function VerifyPage() {
 }
 
 function AdminUsersPage() {
-  const [users, setUsers] = useState<any[]>([]);
+  const [users, setUsers] = useState<Employee[]>([]);
   const [admins, setAdmins] = useState<any[]>([]);
   const [search, setSearch] = useState("");
   const [newAdmin, setNewAdmin] = useState("");
+  const [editingEmail, setEditingEmail] = useState("");
+  const [editDept, setEditDept] = useState("");
+  const [editLoc, setEditLoc] = useState("");
+
+  const [newUser, setNewUser] = useState({
+    EmpID: "",
+    EmpName: "",
+    EmpEmail: "",
+    Department: "",
+    Location: "",
+    ReportingManagerID: "",
+  });
 
   const load = async () => {
     const [u, a] = await Promise.all([
-      api<{ users: any[] }>(`/api/admin/users?pageSize=100&search=${encodeURIComponent(search)}`),
+      api<{ users: Employee[] }>(`/api/admin/users?pageSize=100&search=${encodeURIComponent(search)}`),
       api<any[]>("/api/admin/admins"),
     ]);
     setUsers(u.users || []);
@@ -722,44 +883,109 @@ function AdminUsersPage() {
     load();
   };
 
+  const createUser = async () => {
+    await api("/api/admin/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(newUser),
+    });
+    setNewUser({ EmpID: "", EmpName: "", EmpEmail: "", Department: "", Location: "", ReportingManagerID: "" });
+    load();
+  };
+
+  const startEdit = (u: Employee) => {
+    setEditingEmail(u.EmpEmail);
+    setEditDept(u.Department || u.Dept || "");
+    setEditLoc(u.Location || u.EmpLocation || "");
+  };
+
+  const saveEdit = async () => {
+    if (!editingEmail) return;
+    await api(`/api/admin/users/${encodeURIComponent(editingEmail)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ Department: editDept, Location: editLoc }),
+    });
+    setEditingEmail("");
+    load();
+  };
+
+  const deleteUser = async (email: string) => {
+    if (!window.confirm(`Deactivate ${email}?`)) return;
+    await api(`/api/admin/users/${encodeURIComponent(email)}`, { method: "DELETE" });
+    load();
+  };
+
   return (
-    <div className="grid xl:grid-cols-2 gap-4 animate-fade-in">
+    <div className="space-y-4 animate-fade-in">
       <Card className="glass">
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Users className="h-5 w-5" />User Management</CardTitle>
+          <CardTitle className="flex items-center gap-2"><UserPlus2 className="h-5 w-5" />Create User</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <Input placeholder="Search by name/email/emp id" value={search} onChange={(e) => setSearch(e.target.value)} />
-          <div className="max-h-[420px] overflow-auto border rounded-md">
-            {users.map((u) => (
-              <div className="p-2 border-b text-sm" key={u.EmpEmail}>
-                <div className="font-medium">{u.EmpName} ({u.EmpID})</div>
-                <div className="text-muted-foreground">{u.EmpEmail} · {u.Department} · {u.Location}</div>
-              </div>
-            ))}
-          </div>
+        <CardContent className="grid md:grid-cols-3 gap-2">
+          <Input placeholder="Emp ID" value={newUser.EmpID} onChange={(e) => setNewUser((p) => ({ ...p, EmpID: e.target.value }))} />
+          <Input placeholder="Employee Name" value={newUser.EmpName} onChange={(e) => setNewUser((p) => ({ ...p, EmpName: e.target.value }))} />
+          <Input placeholder="Email" value={newUser.EmpEmail} onChange={(e) => setNewUser((p) => ({ ...p, EmpEmail: e.target.value }))} />
+          <Input placeholder="Department" value={newUser.Department} onChange={(e) => setNewUser((p) => ({ ...p, Department: e.target.value }))} />
+          <Input placeholder="Location" value={newUser.Location} onChange={(e) => setNewUser((p) => ({ ...p, Location: e.target.value }))} />
+          <Input placeholder="Reporting Manager ID" value={newUser.ReportingManagerID} onChange={(e) => setNewUser((p) => ({ ...p, ReportingManagerID: e.target.value }))} />
+          <div className="md:col-span-3"><Button onClick={createUser}>Create User</Button></div>
         </CardContent>
       </Card>
 
-      <Card className="glass">
-        <CardHeader>
-          <CardTitle>Admin Users</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex gap-2">
-            <Input placeholder="admin@premierenergies.com" value={newAdmin} onChange={(e) => setNewAdmin(e.target.value)} />
-            <Button onClick={addAdmin}>Add</Button>
-          </div>
-          <div className="max-h-[420px] overflow-auto border rounded-md">
-            {admins.map((a) => (
-              <div className="p-2 border-b text-sm flex items-center justify-between" key={a.Email}>
-                <span>{a.Email}</span>
-                <Badge variant={a.Active ? "success" : "secondary"}>{a.Active ? "Active" : "Inactive"}</Badge>
+      <div className="grid xl:grid-cols-2 gap-4">
+        <Card className="glass">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Users className="h-5 w-5" />User CRUD</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <Input placeholder="Search by name/email/emp id" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <div className="max-h-[420px] overflow-auto border rounded-md">
+              {users.map((u) => (
+                <div className="p-2 border-b text-sm" key={u.EmpEmail}>
+                  <div className="font-medium">{u.EmpName} ({u.EmpID})</div>
+                  <div className="text-muted-foreground">{u.EmpEmail} · {u.Department || u.Dept} · {u.Location || u.EmpLocation}</div>
+                  <div className="flex gap-2 mt-2">
+                    <Button size="sm" variant="outline" onClick={() => startEdit(u)}>Edit</Button>
+                    <Button size="sm" variant="destructive" onClick={() => deleteUser(u.EmpEmail)}>Deactivate</Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {editingEmail ? (
+              <div className="border rounded-md p-2 space-y-2">
+                <p className="text-xs text-muted-foreground">Editing: {editingEmail}</p>
+                <Input value={editDept} onChange={(e) => setEditDept(e.target.value)} placeholder="Department" />
+                <Input value={editLoc} onChange={(e) => setEditLoc(e.target.value)} placeholder="Location" />
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={saveEdit}>Save</Button>
+                  <Button size="sm" variant="outline" onClick={() => setEditingEmail("")}>Cancel</Button>
+                </div>
               </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="glass">
+          <CardHeader>
+            <CardTitle>Admin Users</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex gap-2">
+              <Input placeholder="admin@premierenergies.com" value={newAdmin} onChange={(e) => setNewAdmin(e.target.value)} />
+              <Button onClick={addAdmin}>Add</Button>
+            </div>
+            <div className="max-h-[420px] overflow-auto border rounded-md">
+              {admins.map((a) => (
+                <div className="p-2 border-b text-sm flex items-center justify-between" key={a.Email}>
+                  <span>{a.Email}</span>
+                  <Badge variant={a.Active ? "success" : "secondary"}>{a.Active ? "Active" : "Inactive"}</Badge>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -772,6 +998,10 @@ function HodsPage() {
   const [department, setDepartment] = useState("");
   const [hodEmail, setHodEmail] = useState("");
 
+  const [combos, setCombos] = useState<{ Location: string; Department: string }[]>([]);
+  const [comboLocationSearch, setComboLocationSearch] = useState("");
+  const [comboDepartmentSearch, setComboDepartmentSearch] = useState("");
+
   const load = () => api<any[]>("/api/hods").then(setList).catch(() => setList([]));
   useEffect(() => { load(); }, []);
 
@@ -779,6 +1009,19 @@ function HodsPage() {
     if (search.length < 2) return;
     api<Employee[]>(`/api/employees/search?q=${encodeURIComponent(search)}`).then(setEmployees).catch(() => setEmployees([]));
   }, [search]);
+
+  const loadCombos = () => {
+    const q = new URLSearchParams();
+    if (comboLocationSearch) q.set("location", comboLocationSearch);
+    if (comboDepartmentSearch) q.set("department", comboDepartmentSearch);
+    api<{ combinations: { Location: string; Department: string }[] }>(`/api/hods/combinations?${q.toString()}`)
+      .then((r) => setCombos(r.combinations || []))
+      .catch(() => setCombos([]));
+  };
+
+  useEffect(() => {
+    loadCombos();
+  }, [comboLocationSearch, comboDepartmentSearch]);
 
   const save = async () => {
     await api("/api/hods", {
@@ -793,15 +1036,38 @@ function HodsPage() {
   };
 
   return (
-    <div className="grid xl:grid-cols-2 gap-4 animate-fade-in">
-      <Card className="glass">
+    <div className="grid xl:grid-cols-3 gap-4 animate-fade-in">
+      <Card className="glass xl:col-span-2">
         <CardHeader>
           <CardTitle>HOD Matrix Master</CardTitle>
-          <CardDescription>Configure HOD per unique Location + Department for controlled workflow.</CardDescription>
+          <CardDescription>Pick exact Location + Department combinations first, then assign HOD.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
-          <Input placeholder="Location" value={location} onChange={(e) => setLocation(e.target.value)} />
-          <Input placeholder="Department" value={department} onChange={(e) => setDepartment(e.target.value)} />
+          <div className="grid md:grid-cols-2 gap-2">
+            <Input placeholder="Search combinations by location" value={comboLocationSearch} onChange={(e) => setComboLocationSearch(e.target.value)} />
+            <Input placeholder="Search combinations by department" value={comboDepartmentSearch} onChange={(e) => setComboDepartmentSearch(e.target.value)} />
+          </div>
+
+          <div className="max-h-52 overflow-auto border rounded-md text-sm">
+            {combos.map((c, idx) => (
+              <button
+                key={`${c.Location}-${c.Department}-${idx}`}
+                type="button"
+                className="w-full text-left p-2 border-b hover:bg-muted"
+                onClick={() => {
+                  setLocation(c.Location);
+                  setDepartment(c.Department);
+                }}
+              >
+                <strong>{c.Location}</strong> / {c.Department}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-2">
+            <Input placeholder="Location" value={location} onChange={(e) => setLocation(e.target.value)} />
+            <Input placeholder="Department" value={department} onChange={(e) => setDepartment(e.target.value)} />
+          </div>
           <Input placeholder="Search employee" value={search} onChange={(e) => setSearch(e.target.value)} />
           <div className="max-h-28 overflow-auto border rounded-md text-sm">
             {employees.map((e) => (
@@ -822,7 +1088,7 @@ function HodsPage() {
 
       <Card className="glass">
         <CardHeader><CardTitle>Configured HODs</CardTitle></CardHeader>
-        <CardContent className="max-h-[420px] overflow-auto">
+        <CardContent className="max-h-[560px] overflow-auto">
           {list.map((r) => (
             <div key={r.Id} className="p-2 border-b text-sm flex items-center justify-between">
               <div>
@@ -1029,7 +1295,7 @@ function PublicViewerPage() {
 
 function Stat({ title, value, icon }: { title: string; value: string; icon: React.ReactNode }) {
   return (
-    <Card className="glass hover:scale-[1.02] transition-transform">
+    <Card className="glass hover:scale-[1.02] transition-transform duration-300">
       <CardContent className="pt-6 flex items-center justify-between">
         <div>
           <p className="text-xs text-muted-foreground">{title}</p>

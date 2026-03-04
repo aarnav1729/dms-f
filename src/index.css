@@ -122,11 +122,21 @@
   .no-print-view * {
     display: none !important;
   }
-  .no-print-view::after {
+.no-print-view::after {
     content: "Printing is disabled for this document.";
     display: block;
     font-size: 24px;
     text-align: center;
     padding: 100px;
   }
+}
+
+@keyframes float-gentle {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-4px); }
+  100% { transform: translateY(0px); }
+}
+
+.animate-float-gentle {
+  animation: float-gentle 3.8s ease-in-out infinite;
 }

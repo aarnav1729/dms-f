@@ -1892,6 +1892,36 @@ app.get("/api/hods/locations-departments", requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/hods/combinations?location=...&department=...
+app.get("/api/hods/combinations", requireAdmin, async (req, res) => {
+  try {
+    const location = String(req.query.location || "").trim();
+    const department = String(req.query.department || "").trim();
+    const rq = spotPool.request();
+    let where = "WHERE ActiveFlag = 1 AND ISNULL(EmpLocation,'') != '' AND ISNULL(Dept,'') != ''";
+    if (location) {
+      rq.input("location", sql.NVarChar, `%${location}%`);
+      where += " AND EmpLocation LIKE @location";
+    }
+    if (department) {
+      rq.input("department", sql.NVarChar, `%${department}%`);
+      where += " AND Dept LIKE @department";
+    }
+
+    const result = await rq.query(`
+      SELECT DISTINCT EmpLocation AS Location, Dept AS Department
+      FROM EMP
+      ${where}
+      ORDER BY EmpLocation, Dept
+    `);
+
+    res.json({ combinations: result.recordset });
+  } catch (err) {
+    console.error("[HODs] combinations error:", err.message);
+    res.status(500).json({ error: "Failed to fetch location-department combinations" });
+  }
+});
+
 // ─── 7G. SHARE GROUPS ──────────────────────────────────────────
 
 // GET /api/share-groups
@@ -2270,6 +2300,83 @@ app.patch("/api/admin/users/:email", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("[AdminUsers] update error:", err.message);
     res.status(500).json({ error: "Failed to update user" });
+  }
+});
+
+// POST /api/admin/users
+app.post("/api/admin/users", requireAdmin, async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const EmpEmail = String(payload.EmpEmail || payload.email || "").trim();
+    const EmpID = String(payload.EmpID || payload.empId || "").trim();
+    const EmpName = String(payload.EmpName || payload.empName || "").trim();
+    const Dept = String(payload.Dept || payload.Department || payload.department || "").trim();
+    const EmpLocation = String(payload.EmpLocation || payload.Location || payload.location || "").trim();
+    const ManagerID = String(payload.ManagerID || payload.ReportingManagerID || payload.reportingManagerId || "").trim();
+    const ActiveFlag = payload.ActiveFlag === undefined ? 1 : payload.ActiveFlag ? 1 : 0;
+
+    if (!EmpEmail) return res.status(400).json({ error: "EmpEmail is required" });
+
+    const exists = await spotPool.request().input("email", sql.NVarChar, EmpEmail)
+      .query("SELECT TOP 1 EmpEmail FROM EMP WHERE EmpEmail = @email");
+    if (exists.recordset.length) {
+      return res.status(409).json({ error: "User already exists" });
+    }
+
+    const values = {
+      EmpEmail,
+      ActiveFlag,
+      ...(EmpID ? { EmpID } : {}),
+      ...(EmpName ? { EmpName } : {}),
+      ...(Dept ? { Dept } : {}),
+      ...(EmpLocation ? { EmpLocation } : {}),
+      ...(ManagerID ? { ManagerID } : {}),
+    };
+
+    const cols = Object.keys(values);
+    const params = cols.map((k) => `@${k}`);
+    const rq = spotPool.request();
+    for (const [k, v] of Object.entries(values)) {
+      if (k === "ActiveFlag") rq.input(k, sql.Bit, Number(v));
+      else rq.input(k, sql.NVarChar(sql.MAX), String(v));
+    }
+
+    await rq.query(`INSERT INTO EMP (${cols.join(",")}) VALUES (${params.join(",")})`);
+    await logAudit("admin_user_create", "user", null, req.user.email, null, null, values, getIp(req));
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[AdminUsers] create error:", err.message);
+    res.status(500).json({ error: "Failed to create user", detail: String(err.message || err) });
+  }
+});
+
+// DELETE /api/admin/users/:email (soft delete)
+app.delete("/api/admin/users/:email", requireAdmin, async (req, res) => {
+  try {
+    const email = String(req.params.email || "").trim();
+    if (!email) return res.status(400).json({ error: "email_required" });
+
+    const existing = await spotPool.request().input("email", sql.NVarChar, email)
+      .query("SELECT TOP 1 * FROM EMP WHERE EmpEmail = @email");
+    if (!existing.recordset.length) return res.status(404).json({ error: "User not found" });
+
+    await spotPool.request().input("email", sql.NVarChar, email)
+      .query("UPDATE EMP SET ActiveFlag = 0 WHERE EmpEmail = @email");
+
+    await logAudit(
+      "admin_user_delete",
+      "user",
+      null,
+      req.user.email,
+      null,
+      existing.recordset[0],
+      { EmpEmail: email, ActiveFlag: 0 },
+      getIp(req)
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[AdminUsers] delete error:", err.message);
+    res.status(500).json({ error: "Failed to delete user" });
   }
 });
 
