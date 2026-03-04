@@ -1379,11 +1379,11 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
   </div>
 </div>
 <div id="pages"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="/vendor/pdfjs/pdf.min.js"></script>
 <script>
   const pdfjsLib = window["pdfjs-dist/build/pdf"];
   if (pdfjsLib) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs/pdf.worker.min.js";
   }
   document.addEventListener("contextmenu", (e)=>e.preventDefault());
   document.addEventListener("keydown", (e)=>{
@@ -3167,6 +3167,8 @@ app.get("/api/audit-log", requireAdmin, async (req, res) => {
 // ─── 10. STATIC FILE SERVING + SPA FALLBACK ────────────────────
 
 const distDir = path.join(__dirname, "../dist");
+const pdfJsDir = path.join(__dirname, "../node_modules/pdfjs-dist/build");
+app.use("/vendor/pdfjs", express.static(pdfJsDir));
 app.use(express.static(distDir));
 
 // SPA fallback
