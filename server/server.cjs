@@ -1332,6 +1332,17 @@ app.get("/api/documents/:id/view", requireAuth, async (req, res) => {
     if (!canAccess) {
       return res.status(403).json({ error: "Access denied" });
     }
+    const accessType = await getEffectiveAccessType(docId, req.user.email);
+    const isViewOnly = accessType === "view_only";
+    const fetchDest = String(req.get("sec-fetch-dest") || "").toLowerCase();
+    const embedMode = String(req.query.embed || "").trim() === "1";
+    // Prevent view-only users from opening raw file in a top-level browser tab/window.
+    if (isViewOnly && !embedMode && (fetchDest === "" || fetchDest === "document")) {
+      return res.status(403).json({
+        error: "view_only_inline_required",
+        message: "View-only documents can only be opened inside the DMS inline viewer.",
+      });
+    }
 
     if (!fs.existsSync(doc.FilePath)) {
       return res.status(404).json({ error: "File not found on disk" });
@@ -1341,6 +1352,11 @@ app.get("/api/documents/:id/view", requireAuth, async (req, res) => {
 
     res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.FileName)}"`);
     res.setHeader("Content-Type", doc.MimeType || "application/octet-stream");
+    res.setHeader("Cache-Control", "no-store");
+    if (isViewOnly) {
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+      res.setHeader("Content-Security-Policy", "frame-ancestors 'self'");
+    }
     fs.createReadStream(doc.FilePath).pipe(res);
   } catch (err) {
     console.error("[View] error:", err.message);

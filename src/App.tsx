@@ -739,9 +739,15 @@ function DashboardPage() {
                 </div>
                 <p className="text-sm text-muted-foreground line-clamp-2">{doc.Description || "No description"}</p>
                 <div className="flex gap-2 pt-1 flex-wrap">
-                  <a href={`/api/documents/${doc.Id}/view`} target="_blank" rel="noreferrer" className="inline-flex">
-                    <Button variant="secondary">Inline View</Button>
-                  </a>
+                  <Button
+                    variant="secondary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openDoc(doc);
+                    }}
+                  >
+                    Inline View
+                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -767,7 +773,7 @@ function DashboardPage() {
               <iframe
                 title="viewer"
                 className="w-full h-[420px] rounded-xl border"
-                src={`/api/documents/${selected.Id}/view`}
+                src={`/api/documents/${selected.Id}/view?embed=1#toolbar=0&navpanes=0&scrollbar=0`}
                 sandbox={docPermission?.canPrint ? "allow-same-origin allow-downloads" : "allow-same-origin"}
               />
             </div>
@@ -1589,6 +1595,8 @@ function GroupsPage() {
 function ApprovalsPage() {
   const [pending, setPending] = useState<Approval[]>([]);
   const [comments, setComments] = useState<Record<number, string>>({});
+  const [viewDocId, setViewDocId] = useState<number | null>(null);
+  const [viewPerm, setViewPerm] = useState<{ canPrint: boolean; canDownload: boolean } | null>(null);
 
   const load = async () => {
     try {
@@ -1602,6 +1610,16 @@ function ApprovalsPage() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (!viewDocId) {
+      setViewPerm(null);
+      return;
+    }
+    api<{ canPrint: boolean; canDownload: boolean }>(`/api/documents/${viewDocId}/permission`)
+      .then((p) => setViewPerm(p))
+      .catch(() => setViewPerm({ canPrint: false, canDownload: false }));
+  }, [viewDocId]);
 
   const decide = async (id: number, action: "approve" | "reject") => {
     const url = `/api/approvals/${id}/${action}`;
@@ -1637,11 +1655,30 @@ function ApprovalsPage() {
             <div className="flex gap-2 flex-wrap">
               <Button onClick={() => decide(p.Id, "approve")}>Approve</Button>
               <Button variant="destructive" onClick={() => decide(p.Id, "reject")}>Reject</Button>
-              <a href={`/api/documents/${p.DocId}/view`} target="_blank" rel="noreferrer"><Button variant="outline">View</Button></a>
+              <Button variant="outline" onClick={() => setViewDocId(p.DocId)}>View</Button>
             </div>
           </CardContent>
         </Card>
       ))}
+      <Dialog open={Boolean(viewDocId)} onOpenChange={(v) => !v && setViewDocId(null)}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>Inline Document Viewer</DialogTitle>
+            <DialogDescription>Permission-aware inline view</DialogDescription>
+          </DialogHeader>
+          {viewDocId ? (
+            <iframe
+              title="approval-viewer"
+              className="w-full h-[70vh] rounded-xl border"
+              src={`/api/documents/${viewDocId}/view?embed=1#toolbar=0&navpanes=0&scrollbar=0`}
+              sandbox={viewPerm?.canPrint ? "allow-same-origin allow-downloads" : "allow-same-origin"}
+            />
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setViewDocId(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
