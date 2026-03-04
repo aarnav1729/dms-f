@@ -617,6 +617,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
 
 function DashboardPage() {
   const { user } = useAuth();
+  const toast = useAppToast();
   const [documents, setDocuments] = useState<Doc[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -628,6 +629,12 @@ function DashboardPage() {
   const [selected, setSelected] = useState<Doc | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [docPermission, setDocPermission] = useState<{ canPrint: boolean; canDownload: boolean } | null>(null);
+  const viewerRef = React.useRef<HTMLDivElement | null>(null);
+  const [deleteDoc, setDeleteDoc] = useState<Doc | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const isOwner = (doc: Doc) =>
+    String(doc.CreatorEmail || "").toLowerCase() === String(user?.email || "").toLowerCase();
 
   const fetchDocs = async () => {
     setLoading(true);
@@ -672,6 +679,38 @@ function DashboardPage() {
       setDocPermission(null);
     }
   };
+
+  const confirmDelete = async () => {
+    if (!deleteDoc || deleting) return;
+    setDeleting(true);
+    try {
+      await api(`/api/documents/${deleteDoc.Id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "Deleted by uploader from dashboard" }),
+      });
+      setDocuments((prev) => prev.filter((d) => d.Id !== deleteDoc.Id));
+      setTotal((prev) => Math.max(0, prev - 1));
+      if (selected?.Id === deleteDoc.Id) {
+        setSelected(null);
+        setHistory([]);
+        setDocPermission(null);
+      }
+      toast({ title: "Document deleted", description: "Soft delete completed. Document is removed from active UI.", variant: "success" });
+      setDeleteDoc(null);
+    } catch (e) {
+      toast({ title: "Delete failed", description: String((e as Error)?.message || ""), variant: "error" });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!selected || !viewerRef.current) return;
+    viewerRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    const t = window.setTimeout(() => viewerRef.current?.focus(), 260);
+    return () => window.clearTimeout(t);
+  }, [selected]);
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -748,6 +787,17 @@ function DashboardPage() {
                   >
                     Inline View
                   </Button>
+                  {isOwner(doc) ? (
+                    <Button
+                      variant="destructive"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDeleteDoc(doc);
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
@@ -756,7 +806,7 @@ function DashboardPage() {
       </div>
 
       {selected ? (
-        <Card className="glass">
+        <Card className="glass" ref={viewerRef} tabIndex={-1}>
           <CardHeader>
             <CardTitle>{selected.Title}</CardTitle>
             <CardDescription>Viewer + history timeline + public access links</CardDescription>
@@ -781,6 +831,13 @@ function DashboardPage() {
                 Permission: {docPermission.canDownload ? "View + Print + Download" : docPermission.canPrint ? "View + Print" : "View Only"}
               </div>
             ) : null}
+            {selected && isOwner(selected) ? (
+              <div className="flex justify-end">
+                <Button variant="destructive" onClick={() => setDeleteDoc(selected)}>
+                  Delete Document
+                </Button>
+              </div>
+            ) : null}
             <PublicLinksPanel docId={selected.Id} />
             <div>
               <h4 className="font-semibold mb-2">History</h4>
@@ -798,6 +855,20 @@ function DashboardPage() {
           </CardContent>
         </Card>
       ) : null}
+      <ConfirmDialog
+        open={Boolean(deleteDoc)}
+        title="Delete Document?"
+        description={
+          deleteDoc
+            ? `This is a soft delete. "${deleteDoc.Title}" will be removed from active UI and search results.`
+            : "This is a soft delete."
+        }
+        confirmLabel={deleting ? "Deleting..." : "Delete"}
+        onCancel={() => {
+          if (!deleting) setDeleteDoc(null);
+        }}
+        onConfirm={confirmDelete}
+      />
     </div>
   );
 }
@@ -911,8 +982,10 @@ function UploadPage() {
 
   useEffect(() => {
     const docFile = file || folderFiles[0];
-    if (!docFile) return;
-    if (metadata && metadata.trim() && metadata.trim() !== "{}") return;
+    if (!docFile) {
+      setMetadata("{}");
+      return;
+    }
     const form = new FormData();
     form.append("file", docFile);
     api<{ extractedText: string }>("/api/documents/extract-metadata", {
@@ -920,10 +993,12 @@ function UploadPage() {
       body: form,
     })
       .then((r) => {
-        if (r.extractedText) setMetadata(r.extractedText.slice(0, 3000));
+        setMetadata((r.extractedText || "{}").slice(0, 3000));
       })
-      .catch(() => {});
-  }, [file, folderFiles, metadata]);
+      .catch(() => {
+        setMetadata("{}");
+      });
+  }, [file, folderFiles]);
 
   useEffect(() => {
     if (shareScope === "selected_users") {
@@ -1039,7 +1114,18 @@ function UploadPage() {
       }
       setTitle("");
       setDescription("");
+      setMetadata("{}");
+      setIsControlled(false);
+      setValidFrom("");
+      setValidTo("");
+      setShareScope("private");
+      setShareGroupId("");
+      setDefaultAccessType("view_only");
+      setSharePreviewUsers([]);
+      setPerUserAccess({});
       setReason("");
+      setAdhocSearch("");
+      setAdhocEmployees([]);
       setFile(null);
       setFolderFiles([]);
       setNewVersionBaseId("__new__");
@@ -1108,11 +1194,6 @@ function UploadPage() {
           <div>
             <Label>Description</Label>
             <textarea value={description} onChange={(e) => setDescription(e.target.value)} className="w-full h-24 rounded-md border bg-background p-3 text-sm" />
-          </div>
-
-          <div>
-            <Label>Metadata JSON (indexed)</Label>
-            <textarea value={metadata} onChange={(e) => setMetadata(e.target.value)} className="w-full h-24 rounded-md border bg-background p-3 text-sm font-mono" />
           </div>
 
           <div className="grid md:grid-cols-2 gap-3">
@@ -1282,16 +1363,14 @@ function UploadPage() {
             </div>
           </div>
 
-          {saving ? (
-            <div className="space-y-1">
-              <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
-                <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Upload progress: {uploadProgress}% {uploadProgress < 100 ? "(saving to server...)" : "(saved)"}
-              </p>
-            </div>
-          ) : null}
+          <div>
+            <Label>Indexed Metadata (Auto-captured)</Label>
+            <textarea
+              value={metadata}
+              readOnly
+              className="w-full h-24 rounded-md border bg-muted/60 p-3 text-sm font-mono cursor-not-allowed"
+            />
+          </div>
 
           <div className="flex gap-2 flex-wrap">
             <Button onClick={submit} disabled={saving} data-tour="upload-submit">{saving ? "Uploading..." : "Upload"}</Button>
@@ -1311,6 +1390,24 @@ function UploadPage() {
           <p>All actions are logged in immutable audit history with before/after state.</p>
         </CardContent>
       </Card>
+      {saving ? (
+        <div className="fixed inset-0 z-[160] bg-black/45 backdrop-blur-sm flex items-center justify-center p-4">
+          <Card className="w-full max-w-md glass">
+            <CardHeader>
+              <CardTitle>Uploading Document</CardTitle>
+              <CardDescription>Please wait while we save and index your file.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <div className="h-3 w-full bg-muted rounded-full overflow-hidden">
+                <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+              </div>
+              <p className="text-sm text-muted-foreground text-center">
+                {uploadProgress}% {uploadProgress < 100 ? "Uploading..." : "Finalizing..."}
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1387,21 +1387,25 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
     if((e.ctrlKey||e.metaKey)&&["s","c"].includes(k)) e.preventDefault();
     if((e.ctrlKey||e.metaKey)&&k==="p" && ${canPrint ? "false" : "true"}) e.preventDefault();
   });
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs";
-  const r = await fetch("/api/documents/${docId}/view?embed=1&raw=1", { credentials: "include", headers: { "x-dms-inline": "1" }});
-  if (!r.ok) throw new Error("Unable to load document");
-  const bytes = new Uint8Array(await r.arrayBuffer());
-  const pdf = await pdfjsLib.getDocument({ data: bytes, disableAutoFetch: true, disableStream: true }).promise;
-  const wrap = document.getElementById("pages");
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 1.5 });
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    await page.render({ canvasContext: ctx, viewport }).promise;
-    wrap.appendChild(canvas);
+  try {
+    const r = await fetch("/api/documents/${docId}/view?embed=1&raw=1", { credentials: "include", headers: { "x-dms-inline": "1" }});
+    if (!r.ok) throw new Error("Unable to load document");
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const pdf = await pdfjsLib.getDocument({ data: bytes, disableAutoFetch: true, disableStream: true, disableWorker: true }).promise;
+    const wrap = document.getElementById("pages");
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      wrap.appendChild(canvas);
+    }
+  } catch (e) {
+    const wrap = document.getElementById("pages");
+    wrap.innerHTML = "<div style='padding:18px;color:#fecaca;background:#7f1d1d;border-radius:8px'>Unable to render preview in this browser session. Please refresh and try again.</div>";
   }
   const printBtn = document.getElementById("printBtn");
   if (printBtn) printBtn.addEventListener("click", () => window.print());
@@ -1409,7 +1413,7 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-store");
       res.setHeader("X-Frame-Options", "SAMEORIGIN");
-      res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self'");
+      res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self'");
       return res.send(html);
     }
 
@@ -1493,7 +1497,7 @@ app.delete("/api/documents/:id", requireAuth, async (req, res) => {
     const isAdmin = (await dmsPool.request().input("ae", sql.NVarChar, req.user.email)
       .query("SELECT Email FROM DmsAdmins WHERE Email = @ae AND Active = 1")).recordset.length > 0;
 
-    if (!isAdmin && doc.CreatorEmail !== req.user.email) {
+    if (!isAdmin && String(doc.CreatorEmail || "").toLowerCase() !== String(req.user.email || "").toLowerCase()) {
       return res.status(403).json({ error: "Only creator or admin can delete" });
     }
 
