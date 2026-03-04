@@ -1391,27 +1391,29 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
     if((e.ctrlKey||e.metaKey)&&["s","c"].includes(k)) e.preventDefault();
     if((e.ctrlKey||e.metaKey)&&k==="p" && ${canPrint ? "false" : "true"}) e.preventDefault();
   });
-  try {
-    const r = await fetch("/api/documents/${docId}/view?embed=1&raw=1", { credentials: "include", headers: { "x-dms-inline": "1" }});
-    if (!r.ok) throw new Error("Unable to load document");
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    if (!pdfjsLib) throw new Error("pdfjs_unavailable");
-    const pdf = await pdfjsLib.getDocument({ data: bytes, disableAutoFetch: true, disableStream: true }).promise;
-    const wrap = document.getElementById("pages");
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1.5 });
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      wrap.appendChild(canvas);
+  (async function renderSecurePdf() {
+    try {
+      const r = await fetch("/api/documents/${docId}/view?embed=1&raw=1", { credentials: "include", headers: { "x-dms-inline": "1" }});
+      if (!r.ok) throw new Error("Unable to load document");
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      if (!pdfjsLib) throw new Error("pdfjs_unavailable");
+      const pdf = await pdfjsLib.getDocument({ data: bytes, disableAutoFetch: true, disableStream: true }).promise;
+      const wrap = document.getElementById("pages");
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        wrap.appendChild(canvas);
+      }
+    } catch (e) {
+      const wrap = document.getElementById("pages");
+      wrap.innerHTML = "<div style='padding:18px;color:#fecaca;background:#7f1d1d;border-radius:8px'>Unable to render preview in this browser session.</div>";
     }
-  } catch (e) {
-    const wrap = document.getElementById("pages");
-    wrap.innerHTML = "<div style='padding:18px;color:#fecaca;background:#7f1d1d;border-radius:8px'>Unable to render preview in this browser session.</div>";
-  }
+  })();
   const printBtn = document.getElementById("printBtn");
   if (printBtn) printBtn.addEventListener("click", () => window.print());
 </script></body></html>`;
