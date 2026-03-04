@@ -1333,7 +1333,8 @@ app.get("/api/documents/:id/view", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "Access denied" });
     }
     const accessType = await getEffectiveAccessType(docId, req.user.email);
-    const isViewOnly = accessType === "view_only";
+    const canPrint = accessType === "owner" || accessType === "view_print" || accessType === "view_print_download";
+    const canDownload = accessType === "owner" || accessType === "view_print_download";
     const embedMode = String(req.query.embed || "").trim() === "1";
     const rawMode = String(req.query.raw || "").trim() === "1";
 
@@ -1343,43 +1344,49 @@ app.get("/api/documents/:id/view", requireAuth, async (req, res) => {
 
     await logAudit("document_view_file", "document", docId, req.user.email, null, null, null, getIp(req));
 
-    if (isViewOnly) {
-      const isPdf = String(doc.MimeType || "").toLowerCase().includes("pdf");
-      if (rawMode) {
-        const inlineHeader = String(req.get("x-dms-inline") || "").trim();
-        if (!embedMode || inlineHeader !== "1") {
-          return res.status(403).json({ error: "raw_view_blocked_for_view_only" });
-        }
-        res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.FileName)}"`);
-        res.setHeader("Content-Type", doc.MimeType || "application/octet-stream");
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("X-Content-Type-Options", "nosniff");
-        return fs.createReadStream(doc.FilePath).pipe(res);
+    const isPdf = String(doc.MimeType || "").toLowerCase().includes("pdf");
+    if (rawMode) {
+      const inlineHeader = String(req.get("x-dms-inline") || "").trim();
+      if (!embedMode || inlineHeader !== "1") {
+        return res.status(403).json({ error: "raw_view_blocked" });
       }
+      res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.FileName)}"`);
+      res.setHeader("Content-Type", doc.MimeType || "application/octet-stream");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      return fs.createReadStream(doc.FilePath).pipe(res);
+    }
 
-      if (!isPdf) {
-        return res.status(415).json({
-          error: "preview_not_supported_for_view_only",
-          message: "Inline preview is only available for PDF in view-only mode.",
-        });
-      }
-
+    if (isPdf) {
       const html = `<!doctype html>
 <html><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Secure Viewer</title>
 <style>
 html,body{margin:0;padding:0;background:#0b1220;color:#f8fafc;font-family:Arial,sans-serif}
-.top{position:sticky;top:0;padding:10px 14px;background:#111827;border-bottom:1px solid rgba(255,255,255,.15);font-size:12px}
+.top{position:sticky;top:0;padding:10px 14px;background:#111827;border-bottom:1px solid rgba(255,255,255,.15);font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.actions{display:flex;gap:8px;align-items:center}
+.btn{background:#1f2937;color:#f8fafc;border:1px solid rgba(255,255,255,.2);padding:6px 10px;border-radius:8px;cursor:pointer}
+.btn:hover{background:#374151}
 #pages{padding:12px;display:flex;flex-direction:column;gap:12px;align-items:center}
 canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);background:white}
 </style></head><body>
-<div class="top">View-only secure preview. Print and download are disabled.</div>
+<div class="top">
+  <div>${canPrint || canDownload ? "Permission-based secure preview." : "View-only secure preview. Print and download are disabled."}</div>
+  <div class="actions">
+    ${canPrint ? `<button class="btn" id="printBtn" type="button">Print</button>` : ""}
+    ${canDownload ? `<a class="btn" id="downloadBtn" href="/api/documents/${docId}/download" target="_blank" rel="noreferrer">Download</a>` : ""}
+  </div>
+</div>
 <div id="pages"></div>
 <script type="module">
   import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.min.mjs";
   document.addEventListener("contextmenu", (e)=>e.preventDefault());
-  document.addEventListener("keydown", (e)=>{ if((e.ctrlKey||e.metaKey)&&["p","s","c"].includes(e.key.toLowerCase())) e.preventDefault(); });
+  document.addEventListener("keydown", (e)=>{
+    const k = e.key.toLowerCase();
+    if((e.ctrlKey||e.metaKey)&&["s","c"].includes(k)) e.preventDefault();
+    if((e.ctrlKey||e.metaKey)&&k==="p" && ${canPrint ? "false" : "true"}) e.preventDefault();
+  });
   pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.8.69/pdf.worker.min.mjs";
   const r = await fetch("/api/documents/${docId}/view?embed=1&raw=1", { credentials: "include", headers: { "x-dms-inline": "1" }});
   if (!r.ok) throw new Error("Unable to load document");
@@ -1396,6 +1403,8 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
     await page.render({ canvasContext: ctx, viewport }).promise;
     wrap.appendChild(canvas);
   }
+  const printBtn = document.getElementById("printBtn");
+  if (printBtn) printBtn.addEventListener("click", () => window.print());
 </script></body></html>`;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-store");
@@ -1404,10 +1413,18 @@ canvas{max-width:100%;height:auto;box-shadow:0 8px 24px rgba(0,0,0,.35);backgrou
       return res.send(html);
     }
 
-    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.FileName)}"`);
-    res.setHeader("Content-Type", doc.MimeType || "application/octet-stream");
+    // Non-PDF fallback in iframe.
+    const fallbackHtml = `<!doctype html><html><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>body{margin:0;font-family:Arial,sans-serif;background:#0b1220;color:#f8fafc;padding:20px}.btn{display:inline-block;margin-top:12px;background:#1f2937;color:#fff;border:1px solid rgba(255,255,255,.2);padding:8px 12px;border-radius:8px;text-decoration:none}</style>
+</head><body>
+<h3>Inline preview is not supported for this file type.</h3>
+<p>File: ${String(doc.FileName || "Document")}</p>
+${canDownload ? `<a class="btn" href="/api/documents/${docId}/download" target="_blank" rel="noreferrer">Download File</a>` : `<p>Download is disabled for your access level.</p>`}
+</body></html>`;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
-    fs.createReadStream(doc.FilePath).pipe(res);
+    return res.send(fallbackHtml);
   } catch (err) {
     console.error("[View] error:", err.message);
     res.status(500).json({ error: "View failed" });
