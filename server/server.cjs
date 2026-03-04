@@ -502,6 +502,87 @@ function moveFileToObsolete(filePath) {
   }
 }
 
+const ACCESS_TYPES = new Set(["owner", "view_only", "view_print", "view_print_download"]);
+function normalizeAccessType(v) {
+  const value = String(v || "").trim().toLowerCase();
+  if (ACCESS_TYPES.has(value)) return value;
+  return "view_only";
+}
+
+async function getEmpContextByEmail(email) {
+  const result = await spotPool
+    .request()
+    .input("email", sql.NVarChar, email)
+    .query(`
+      SELECT TOP 1
+        EmpEmail,
+        EmpName,
+        EmpID,
+        COALESCE(Dept, Department, '') AS Department,
+        COALESCE(EmpLocation, Location, '') AS Location
+      FROM EMP
+      WHERE EmpEmail = @email
+    `);
+  return result.recordset[0] || null;
+}
+
+async function getScopeUsers(scope, groupId, actorEmail) {
+  const normalizedScope = String(scope || "private").toLowerCase();
+  const users = [];
+  if (normalizedScope === "private") {
+    const ctx = await getEmpContextByEmail(actorEmail);
+    users.push({
+      EmpEmail: actorEmail,
+      EmpName: ctx?.EmpName || actorEmail,
+      EmpID: ctx?.EmpID || null,
+      Department: ctx?.Department || "",
+      Location: ctx?.Location || "",
+    });
+    return users;
+  }
+
+  if (normalizedScope === "group") {
+    const members = await dmsPool.request().input("gid", sql.Int, Number(groupId || 0))
+      .query(`
+        SELECT e.EmpEmail, e.EmpName, e.EmpID,
+               COALESCE(e.Dept, e.Department, '') AS Department,
+               COALESCE(e.EmpLocation, e.Location, '') AS Location
+        FROM DmsShareGroupMembers gm
+        LEFT JOIN EMP e ON e.EmpEmail = gm.Email
+        WHERE gm.GroupId = @gid
+      `);
+    return members.recordset.filter((x) => x.EmpEmail);
+  }
+
+  if (normalizedScope === "department") {
+    const actor = await getEmpContextByEmail(actorEmail);
+    const dept = actor?.Department || "";
+    if (!dept) return [];
+    const deptUsers = await spotPool.request().input("dept", sql.NVarChar, dept)
+      .query(`
+        SELECT EmpEmail, EmpName, EmpID,
+               COALESCE(Dept, Department, '') AS Department,
+               COALESCE(EmpLocation, Location, '') AS Location
+        FROM EMP
+        WHERE ActiveFlag = 1 AND COALESCE(Dept, Department, '') = @dept
+      `);
+    return deptUsers.recordset.filter((x) => x.EmpEmail);
+  }
+
+  if (normalizedScope === "company") {
+    const all = await spotPool.request().query(`
+      SELECT EmpEmail, EmpName, EmpID,
+             COALESCE(Dept, Department, '') AS Department,
+             COALESCE(EmpLocation, Location, '') AS Location
+      FROM EMP
+      WHERE ActiveFlag = 1 AND EmpEmail IS NOT NULL AND EmpEmail LIKE '%@premierenergies.com'
+    `);
+    return all.recordset.filter((x) => x.EmpEmail);
+  }
+
+  return [];
+}
+
 // ─── 8. AUDIT LOGGING HELPER ───────────────────────────────────
 async function logAudit(action, entityType, entityId, userEmail, reason, beforeState, afterState, ip) {
   try {
@@ -667,7 +748,7 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const { title, description, isControlled, shareScope, shareGroupId, reason, metadata } = req.body;
+    const { title, description, isControlled, shareScope, shareGroupId, reason, metadata, defaultAccessType, accessControl } = req.body;
     if (!title) {
       return res.status(400).json({ error: "Title is required" });
     }
@@ -736,14 +817,51 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
         VALUES (@docId, @version, @fileName, @filePath, @fileSize, @fileHash, @uploadedBy, @reason)
       `);
 
-    // Grant creator access
+    // Grant creator access + scope-based recipients with per-user permissions
     await dmsPool
       .request()
       .input("docId", sql.Int, docId)
       .input("email", sql.NVarChar, req.user.email)
       .query(`
-        INSERT INTO DmsDocAccess (DocId, Email, AccessType) VALUES (@docId, @email, 'owner')
+        MERGE DmsDocAccess AS t
+        USING (SELECT @docId AS DocId, @email AS Email) s
+        ON t.DocId=s.DocId AND t.Email=s.Email
+        WHEN MATCHED THEN UPDATE SET AccessType='owner'
+        WHEN NOT MATCHED THEN INSERT (DocId, Email, AccessType) VALUES (@docId, @email, 'owner');
       `);
+
+    const scopeUsers = await getScopeUsers(shareScope || "private", shareGroupId, req.user.email);
+    let perUser = [];
+    try {
+      if (accessControl) {
+        perUser = JSON.parse(String(accessControl));
+      }
+    } catch (_e) {
+      perUser = [];
+    }
+    const perUserMap = new Map(
+      (Array.isArray(perUser) ? perUser : [])
+        .filter((x) => x && x.email)
+        .map((x) => [String(x.email).toLowerCase(), normalizeAccessType(x.accessType)])
+    );
+    const defaultType = normalizeAccessType(defaultAccessType || "view_only");
+    for (const member of scopeUsers) {
+      const email = String(member.EmpEmail || "").trim().toLowerCase();
+      if (!email || email === String(req.user.email).toLowerCase()) continue;
+      const accessType = perUserMap.get(email) || defaultType;
+      await dmsPool
+        .request()
+        .input("docId", sql.Int, docId)
+        .input("email", sql.NVarChar, email)
+        .input("accessType", sql.NVarChar, accessType)
+        .query(`
+          MERGE DmsDocAccess AS t
+          USING (SELECT @docId AS DocId, @email AS Email) s
+          ON t.DocId=s.DocId AND t.Email=s.Email
+          WHEN MATCHED THEN UPDATE SET AccessType=@accessType
+          WHEN NOT MATCHED THEN INSERT (DocId, Email, AccessType) VALUES (@docId, @email, @accessType);
+        `);
+    }
 
     // If controlled, create approval for reporting manager
     if (controlled && emp.ManagerID) {
@@ -1033,6 +1151,37 @@ app.get("/api/documents/:id", requireAuth, async (req, res) => {
   }
 });
 
+async function getEffectiveAccessType(docId, email) {
+  const docResult = await dmsPool
+    .request()
+    .input("id", sql.Int, docId)
+    .query("SELECT CreatorEmail, ShareScope, ShareGroupId, Department FROM DmsDocuments WHERE Id = @id AND Status != 'deleted'");
+  if (!docResult.recordset.length) return null;
+  const doc = docResult.recordset[0];
+  if (String(doc.CreatorEmail || "").toLowerCase() === String(email || "").toLowerCase()) return "owner";
+
+  const explicit = await dmsPool.request()
+    .input("docId", sql.Int, docId)
+    .input("email", sql.NVarChar, email)
+    .query("SELECT TOP 1 AccessType FROM DmsDocAccess WHERE DocId = @docId AND Email = @email");
+  if (explicit.recordset.length) return normalizeAccessType(explicit.recordset[0].AccessType);
+
+  // Backward compatibility for legacy documents with scope-only access
+  if (doc.ShareScope === "company") return "view_only";
+  if (doc.ShareScope === "department") {
+    const ctx = await getEmpContextByEmail(email);
+    if (ctx?.Department && ctx.Department === doc.Department) return "view_only";
+  }
+  if (doc.ShareScope === "group" && doc.ShareGroupId) {
+    const inGroup = await dmsPool.request()
+      .input("gid", sql.Int, doc.ShareGroupId)
+      .input("email", sql.NVarChar, email)
+      .query("SELECT TOP 1 1 AS ok FROM DmsShareGroupMembers WHERE GroupId = @gid AND Email = @email");
+    if (inGroup.recordset.length) return "view_only";
+  }
+  return null;
+}
+
 // GET /api/documents/:id/download
 app.get("/api/documents/:id/download", requireAuth, async (req, res) => {
   try {
@@ -1051,6 +1200,12 @@ app.get("/api/documents/:id/download", requireAuth, async (req, res) => {
     const canAccess = await checkDocAccess(docId, req.user.email);
     if (!canAccess) {
       return res.status(403).json({ error: "Access denied" });
+    }
+
+    const accessType = await getEffectiveAccessType(docId, req.user.email);
+    const canDownload = accessType === "owner" || accessType === "view_print_download";
+    if (!canDownload) {
+      return res.status(403).json({ error: "download_not_allowed_for_your_permission" });
     }
 
     if (!fs.existsSync(doc.FilePath)) {
@@ -1100,6 +1255,24 @@ app.get("/api/documents/:id/view", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("[View] error:", err.message);
     res.status(500).json({ error: "View failed" });
+  }
+});
+
+// GET /api/documents/:id/permission
+app.get("/api/documents/:id/permission", requireAuth, async (req, res) => {
+  try {
+    const docId = Number(req.params.id);
+    const accessType = await getEffectiveAccessType(docId, req.user.email);
+    if (!accessType) return res.status(403).json({ error: "Access denied" });
+    res.json({
+      accessType,
+      canView: true,
+      canPrint: accessType === "owner" || accessType === "view_print" || accessType === "view_print_download",
+      canDownload: accessType === "owner" || accessType === "view_print_download",
+    });
+  } catch (err) {
+    console.error("[Permission] error:", err.message);
+    res.status(500).json({ error: "Failed to fetch permission" });
   }
 });
 
@@ -1923,6 +2096,32 @@ app.get("/api/hods/combinations", requireAdmin, async (req, res) => {
 });
 
 // ─── 7G. SHARE GROUPS ──────────────────────────────────────────
+
+// GET /api/share-preview?scope=private|group|department|company&groupId=#
+app.get("/api/share-preview", requireAuth, async (req, res) => {
+  try {
+    const scope = String(req.query.scope || "private");
+    const groupId = Number(req.query.groupId || 0);
+    const users = await getScopeUsers(scope, groupId, req.user.email);
+    const dedup = Array.from(
+      new Map(users.map((u) => [String(u.EmpEmail || "").toLowerCase(), u])).values()
+    );
+    res.json({
+      scope,
+      count: dedup.length,
+      users: dedup.map((u) => ({
+        email: u.EmpEmail,
+        name: u.EmpName || u.EmpEmail,
+        empId: u.EmpID || null,
+        department: u.Department || "",
+        location: u.Location || "",
+      })),
+    });
+  } catch (err) {
+    console.error("[SharePreview] error:", err.message);
+    res.status(500).json({ error: "Failed to generate share preview" });
+  }
+});
 
 // GET /api/share-groups
 app.get("/api/share-groups", requireAuth, async (req, res) => {

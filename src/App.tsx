@@ -665,12 +665,16 @@ function PublicLinksPanel({ docId }: { docId: number }) {
 }
 
 function UploadPage() {
+  const { user } = useAuth();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [metadata, setMetadata] = useState("{}");
   const [isControlled, setIsControlled] = useState(false);
   const [shareScope, setShareScope] = useState("private");
   const [shareGroupId, setShareGroupId] = useState("");
+  const [defaultAccessType, setDefaultAccessType] = useState("view_only");
+  const [sharePreviewUsers, setSharePreviewUsers] = useState<Array<{ email: string; name: string; empId: string | null; department: string; location: string }>>([]);
+  const [perUserAccess, setPerUserAccess] = useState<Record<string, string>>({});
   const [groups, setGroups] = useState<any[]>([]);
   const [reason, setReason] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -681,6 +685,29 @@ function UploadPage() {
     api<any[]>("/api/share-groups").then(setGroups).catch(() => setGroups([]));
   }, []);
 
+  useEffect(() => {
+    const q = new URLSearchParams();
+    q.set("scope", shareScope);
+    if (shareScope === "group" && shareGroupId) q.set("groupId", shareGroupId);
+    if (shareScope === "group" && !shareGroupId) {
+      setSharePreviewUsers([]);
+      return;
+    }
+    api<{ users: Array<{ email: string; name: string; empId: string | null; department: string; location: string }> }>(`/api/share-preview?${q.toString()}`)
+      .then((r) => {
+        const users = r.users || [];
+        setSharePreviewUsers(users);
+        setPerUserAccess((prev) => {
+          const next = { ...prev };
+          for (const u of users) {
+            if (!next[u.email]) next[u.email] = defaultAccessType;
+          }
+          return next;
+        });
+      })
+      .catch(() => setSharePreviewUsers([]));
+  }, [shareScope, shareGroupId, defaultAccessType]);
+
   const doUpload = async (docFile: File, overrideTitle?: string) => {
     const form = new FormData();
     form.append("file", docFile);
@@ -690,6 +717,16 @@ function UploadPage() {
     form.append("isControlled", String(isControlled));
     form.append("shareScope", shareScope);
     if (shareScope === "group" && shareGroupId) form.append("shareGroupId", shareGroupId);
+    form.append("defaultAccessType", defaultAccessType);
+    form.append(
+      "accessControl",
+      JSON.stringify(
+        sharePreviewUsers.map((u) => ({
+          email: u.email,
+          accessType: perUserAccess[u.email] || defaultAccessType,
+        }))
+      )
+    );
     if (reason) form.append("reason", reason);
     await api("/api/documents/upload", { method: "POST", body: form });
   };
@@ -784,6 +821,67 @@ function UploadPage() {
               </div>
             ) : null}
           </div>
+
+          <div className="grid md:grid-cols-2 gap-3">
+            <div>
+              <Label>Default Permission</Label>
+              <Select value={defaultAccessType} onValueChange={setDefaultAccessType}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="view_only">View Only</SelectItem>
+                  <SelectItem value="view_print">View + Print</SelectItem>
+                  <SelectItem value="view_print_download">View + Print + Download</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="text-xs text-muted-foreground self-end">
+              {sharePreviewUsers.length > 0
+                ? `${sharePreviewUsers.length} users included in this permission set`
+                : `No additional users included for current scope`}
+            </div>
+          </div>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Included Users & Per-Person Permissions</CardTitle>
+              <CardDescription>
+                Scope: <strong>{shareScope}</strong>{shareScope === "group" && shareGroupId ? ` (Group ID: ${shareGroupId})` : ""}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="max-h-52 overflow-auto border rounded-md">
+                {sharePreviewUsers.length === 0 ? (
+                  <p className="p-3 text-sm text-muted-foreground">
+                    {shareScope === "private"
+                      ? `Only you (${user?.email || "current user"}) will have access.`
+                      : "Select a valid share scope/group to preview included users."}
+                  </p>
+                ) : (
+                  sharePreviewUsers.map((u) => (
+                    <div key={u.email} className="p-2 border-b flex flex-wrap items-center gap-2 justify-between">
+                      <div className="text-sm">
+                        <div className="font-medium">{u.name}</div>
+                        <div className="text-xs text-muted-foreground">{u.email} · {u.department} · {u.location}</div>
+                      </div>
+                      <div className="w-52">
+                        <Select
+                          value={perUserAccess[u.email] || defaultAccessType}
+                          onValueChange={(value) => setPerUserAccess((prev) => ({ ...prev, [u.email]: value }))}
+                        >
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="view_only">View Only</SelectItem>
+                            <SelectItem value="view_print">View + Print</SelectItem>
+                            <SelectItem value="view_print_download">View + Print + Download</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </CardContent>
+          </Card>
 
           <div className="grid md:grid-cols-2 gap-3">
             <div>
