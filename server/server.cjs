@@ -718,17 +718,21 @@ app.get("/api/profile", requireAuth, async (req, res) => {
 // GET /api/employees/search?q=xxx
 app.get("/api/employees/search", requireAuth, async (req, res) => {
   try {
-    const q = req.query.q || "";
-    if (q.length < 2) {
-      return res.json([]);
-    }
+    const qRaw = String(req.query.q || "").trim();
+    if (qRaw.length < 1) return res.json([]);
     const result = await spotPool
       .request()
-      .input("q", sql.NVarChar, `%${q}%`)
+      .input("q", sql.NVarChar, `%${qRaw}%`)
       .query(`
-        SELECT TOP 20 EmpID, EmpName, EmpEmail, Dept AS Department, EmpLocation AS Location
+        SELECT TOP 30 EmpID, EmpName, EmpEmail, Dept AS Department, EmpLocation AS Location
         FROM EMP
-        WHERE (EmpName LIKE @q OR EmpEmail LIKE @q)
+        WHERE (
+          EmpName LIKE @q
+          OR EmpEmail LIKE @q
+          OR EmpID LIKE @q
+          OR COALESCE(Dept,'') LIKE @q
+          OR COALESCE(EmpLocation,'') LIKE @q
+        )
           AND ActiveFlag = 1
         ORDER BY EmpName
       `);
@@ -2159,9 +2163,20 @@ app.get("/api/share-groups", requireAuth, async (req, res) => {
 // POST /api/share-groups
 app.post("/api/share-groups", requireAuth, async (req, res) => {
   try {
-    const { name, members } = req.body;
-    if (!name) {
+    const name = String(req.body?.name || "").trim();
+    const members = Array.isArray(req.body?.members) ? req.body.members : [];
+    if (!name || name.length < 2) {
       return res.status(400).json({ error: "Group name is required" });
+    }
+    const normalizedMembers = Array.from(
+      new Set(
+        members
+          .map((m) => String(m || "").trim().toLowerCase())
+          .filter(Boolean)
+      )
+    );
+    if (!normalizedMembers.length) {
+      return res.status(400).json({ error: "At least one member is required" });
     }
 
     const insertResult = await dmsPool
@@ -2176,20 +2191,21 @@ app.post("/api/share-groups", requireAuth, async (req, res) => {
 
     const groupId = insertResult.recordset[0].Id;
 
-    if (members && Array.isArray(members)) {
-      for (const email of members) {
-        if (email && email.trim()) {
-          await dmsPool
-            .request()
-            .input("groupId", sql.Int, groupId)
-            .input("email", sql.NVarChar, email.trim())
-            .query("INSERT INTO DmsShareGroupMembers (GroupId, Email) VALUES (@groupId, @email)");
-        }
-      }
+    for (const email of normalizedMembers) {
+      await dmsPool
+        .request()
+        .input("groupId", sql.Int, groupId)
+        .input("email", sql.NVarChar, email)
+        .query(`
+          MERGE DmsShareGroupMembers AS t
+          USING (SELECT @groupId AS GroupId, @email AS Email) s
+          ON t.GroupId=s.GroupId AND t.Email=s.Email
+          WHEN NOT MATCHED THEN INSERT (GroupId, Email) VALUES (@groupId, @email);
+        `);
     }
 
-    await logAudit("share_group_create", "share_group", groupId, req.user.email, null, null, { name, members }, getIp(req));
-    res.json({ success: true, id: groupId });
+    await logAudit("share_group_create", "share_group", groupId, req.user.email, null, null, { name, members: normalizedMembers }, getIp(req));
+    res.json({ success: true, id: groupId, name, members: normalizedMembers });
   } catch (err) {
     console.error("[ShareGroups] create error:", err.message);
     res.status(500).json({ error: "Failed to create share group" });

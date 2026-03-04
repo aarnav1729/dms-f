@@ -927,26 +927,57 @@ function CreateGroupInline({ onSaved }: { onSaved: () => void }) {
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [members, setMembers] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
 
   useEffect(() => {
-    if (search.length < 2) {
+    const q = search.trim();
+    if (q.length < 1) {
       setEmployees([]);
+      setError("");
       return;
     }
-    api<Employee[]>(`/api/employees/search?q=${encodeURIComponent(search)}`).then(setEmployees).catch(() => setEmployees([]));
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      setError("");
+      api<Employee[]>(`/api/employees/search?q=${encodeURIComponent(q)}`)
+        .then((r) => setEmployees(r || []))
+        .catch(() => {
+          setEmployees([]);
+          setError("Search failed. Try again.");
+        })
+        .finally(() => setLoading(false));
+    }, 180);
+    return () => window.clearTimeout(timer);
   }, [search]);
 
   const save = async () => {
-    if (!name || members.length === 0) return;
-    await api("/api/share-groups", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name, members }),
-    });
-    setName("");
-    setMembers([]);
-    setSearch("");
-    onSaved();
+    setStatus("");
+    setError("");
+    if (!name.trim()) {
+      setError("Group name is required.");
+      return;
+    }
+    if (members.length === 0) {
+      setError("Please add at least one member.");
+      return;
+    }
+    try {
+      await api("/api/share-groups", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), members }),
+      });
+      setName("");
+      setMembers([]);
+      setSearch("");
+      setEmployees([]);
+      setStatus("Group created successfully.");
+      onSaved();
+    } catch (e) {
+      setError(String((e as Error)?.message || "Failed to create group."));
+    }
   };
 
   return (
@@ -954,8 +985,12 @@ function CreateGroupInline({ onSaved }: { onSaved: () => void }) {
       <CardContent className="pt-4 space-y-2">
         <Label>Create Custom Group</Label>
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Group name" />
-        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search employee" />
+        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search employee (name, email, emp id, dept, location)" />
         <div className="max-h-24 overflow-auto text-xs border rounded-md">
+          {loading ? <p className="p-2 text-muted-foreground">Searching...</p> : null}
+          {!loading && search.trim().length > 0 && employees.length === 0 ? (
+            <p className="p-2 text-muted-foreground">No matching employees.</p>
+          ) : null}
           {employees.map((e) => (
             <button
               key={e.EmpEmail}
@@ -967,8 +1002,24 @@ function CreateGroupInline({ onSaved }: { onSaved: () => void }) {
             </button>
           ))}
         </div>
-        <div className="text-xs text-muted-foreground">Selected: {members.join(", ") || "none"}</div>
-        <Button variant="outline" size="sm" onClick={save}>Save Group</Button>
+        <div className="text-xs text-muted-foreground">Selected Members</div>
+        <div className="max-h-24 overflow-auto border rounded-md p-2 flex flex-wrap gap-1">
+          {members.length === 0 ? <span className="text-xs text-muted-foreground">none</span> : null}
+          {members.map((m) => (
+            <button
+              key={m}
+              type="button"
+              className="text-xs px-2 py-1 rounded-full border hover:bg-muted"
+              onClick={() => setMembers((prev) => prev.filter((x) => x !== m))}
+              title="Remove member"
+            >
+              {m} ×
+            </button>
+          ))}
+        </div>
+        {error ? <div className="text-xs text-destructive">{error}</div> : null}
+        {status ? <div className="text-xs text-emerald-700">{status}</div> : null}
+        <Button variant="outline" size="sm" onClick={save} disabled={!name.trim() || members.length === 0}>Save Group</Button>
       </CardContent>
     </Card>
   );
