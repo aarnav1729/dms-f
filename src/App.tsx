@@ -1112,12 +1112,14 @@ function CreateGroupInline({ onSaved }: { onSaved: () => void }) {
 }
 
 function GroupsPage() {
+  const toast = useAppToast();
   const [groups, setGroups] = useState<any[]>([]);
   const [name, setName] = useState("");
   const [search, setSearch] = useState("");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [members, setMembers] = useState<string[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<number | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
 
@@ -1165,6 +1167,7 @@ function GroupsPage() {
           body: JSON.stringify(payload),
         });
         setStatus("Group updated.");
+        toast({ title: "Group updated", variant: "success" });
       } else {
         await api("/api/share-groups", {
           method: "POST",
@@ -1172,11 +1175,13 @@ function GroupsPage() {
           body: JSON.stringify(payload),
         });
         setStatus("Group created.");
+        toast({ title: "Group created", variant: "success" });
       }
       resetForm();
       loadGroups();
     } catch (e) {
       setError(String((e as Error)?.message || "Operation failed"));
+      toast({ title: "Group operation failed", description: String((e as Error)?.message || ""), variant: "error" });
     }
   };
 
@@ -1188,14 +1193,15 @@ function GroupsPage() {
   };
 
   const remove = async (id: number) => {
-    if (!window.confirm("Delete this group?")) return;
     try {
       await api(`/api/share-groups/${id}`, { method: "DELETE" });
       if (editingId === id) resetForm();
       setStatus("Group deleted.");
+      toast({ title: "Group deleted", variant: "success" });
       loadGroups();
     } catch (e) {
       setError(String((e as Error)?.message || "Delete failed"));
+      toast({ title: "Delete failed", description: String((e as Error)?.message || ""), variant: "error" });
     }
   };
 
@@ -1256,10 +1262,22 @@ function GroupsPage() {
               <div className="text-xs max-h-20 overflow-auto border rounded p-1">{(g.members || []).join(", ") || "No members"}</div>
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" onClick={() => startEdit(g)}>Edit</Button>
-                <Button size="sm" variant="destructive" onClick={() => remove(g.Id)}>Delete</Button>
+                <Button size="sm" variant="destructive" onClick={() => setDeleteCandidate(g.Id)}>Delete</Button>
               </div>
             </div>
           ))}
+          <ConfirmDialog
+            open={deleteCandidate !== null}
+            title="Delete Group"
+            description="This will remove the group and all its members."
+            confirmLabel="Delete"
+            onCancel={() => setDeleteCandidate(null)}
+            onConfirm={async () => {
+              if (deleteCandidate === null) return;
+              await remove(deleteCandidate);
+              setDeleteCandidate(null);
+            }}
+          />
         </CardContent>
       </Card>
     </div>
@@ -1892,6 +1910,37 @@ function PublicViewerPage() {
   );
 }
 
+function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmLabel,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void | Promise<void>;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(v) => (!v ? onCancel() : undefined)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button variant="destructive" onClick={() => void onConfirm()}>{confirmLabel}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function Stat({ title, value, icon }: { title: string; value: string; icon: React.ReactNode }) {
   return (
     <Card className="glass hover:scale-[1.02] transition-transform duration-300">
@@ -1948,18 +1997,20 @@ function AuthenticatedApp() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/public/:token" element={<PublicViewerPage />} />
-        <Route
-          path="*"
-          element={
-            <AuthProvider>
-              <AuthenticatedApp />
-            </AuthProvider>
-          }
-        />
-      </Routes>
-    </BrowserRouter>
+    <ToastProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/public/:token" element={<PublicViewerPage />} />
+          <Route
+            path="*"
+            element={
+              <AuthProvider>
+                <AuthenticatedApp />
+              </AuthProvider>
+            }
+          />
+        </Routes>
+      </BrowserRouter>
+    </ToastProvider>
   );
 }
