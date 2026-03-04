@@ -38,6 +38,14 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -115,6 +123,70 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(fallback || `HTTP ${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+type AppToast = {
+  id: number;
+  title: string;
+  description?: string;
+  variant?: "success" | "error" | "info";
+};
+
+const ToastContext = React.createContext<
+  ((toast: Omit<AppToast, "id">) => void) | undefined
+>(undefined);
+
+function useAppToast() {
+  const ctx = React.useContext(ToastContext);
+  if (!ctx) throw new Error("useAppToast must be used within ToastProvider");
+  return ctx;
+}
+
+function ToastProvider({ children }: { children: React.ReactNode }) {
+  const [toasts, setToasts] = useState<AppToast[]>([]);
+
+  const pushToast = (toast: Omit<AppToast, "id">) => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setToasts((prev) => [...prev, { id, ...toast }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
+  };
+
+  const remove = (id: number) => setToasts((prev) => prev.filter((t) => t.id !== id));
+
+  return (
+    <ToastContext.Provider value={pushToast}>
+      {children}
+      <div className="fixed top-4 right-4 z-[140] space-y-2 w-[min(92vw,420px)]">
+        <AnimatePresence>
+          {toasts.map((t) => (
+            <motion.div
+              key={t.id}
+              initial={{ opacity: 0, y: -12, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.98 }}
+              className={`rounded-xl border p-3 shadow-xl backdrop-blur-xl ${
+                t.variant === "error"
+                  ? "bg-red-50/95 border-red-300 text-red-900"
+                  : t.variant === "success"
+                    ? "bg-emerald-50/95 border-emerald-300 text-emerald-900"
+                    : "bg-white/95 border-slate-200 text-slate-900"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-sm">{t.title}</div>
+                  {t.description ? <div className="text-xs opacity-80">{t.description}</div> : null}
+                </div>
+                <button type="button" className="text-xs opacity-70 hover:opacity-100" onClick={() => remove(t.id)}>✕</button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </ToastContext.Provider>
+  );
 }
 
 function MouseGlow() {
@@ -610,6 +682,7 @@ function DashboardPage() {
 }
 
 function PublicLinksPanel({ docId }: { docId: number }) {
+  const toast = useAppToast();
   const [links, setLinks] = useState<any[]>([]);
   const [expiresAt, setExpiresAt] = useState("");
 
@@ -633,9 +706,10 @@ function PublicLinksPanel({ docId }: { docId: number }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ docId, expiresAt: expiresAt || null }),
       });
+      toast({ title: "Public link generated", description: "Share the link for view-only access.", variant: "success" });
       load();
-    } catch {
-      alert("Failed to create public link");
+    } catch (e) {
+      toast({ title: "Failed to create public link", description: String((e as Error)?.message || ""), variant: "error" });
     }
   };
 
@@ -668,6 +742,7 @@ function PublicLinksPanel({ docId }: { docId: number }) {
 function UploadPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const toast = useAppToast();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [metadata, setMetadata] = useState("{}");
@@ -681,6 +756,8 @@ function UploadPage() {
   const [reason, setReason] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [folderFiles, setFolderFiles] = useState<File[]>([]);
+  const [fileInputKey, setFileInputKey] = useState(0);
+  const [folderInputKey, setFolderInputKey] = useState(0);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -735,15 +812,15 @@ function UploadPage() {
 
   const submit = async () => {
     if (!file && folderFiles.length === 0) {
-      alert("Choose a file or folder.");
+      toast({ title: "No file selected", description: "Choose a file or folder to upload.", variant: "info" });
       return;
     }
     if (shareScope === "group" && !shareGroupId) {
-      alert("Please select a group for group-based sharing.");
+      toast({ title: "Group required", description: "Select a group for group-based sharing.", variant: "info" });
       return;
     }
     if (isControlled && !reason.trim()) {
-      alert("Reason is mandatory for controlled copy/revision uploads.");
+      toast({ title: "Reason required", description: "Controlled uploads require a revision reason.", variant: "info" });
       return;
     }
     setSaving(true);
@@ -757,10 +834,12 @@ function UploadPage() {
       setReason("");
       setFile(null);
       setFolderFiles([]);
-      alert("Uploaded successfully.");
+      setFileInputKey((k) => k + 1);
+      setFolderInputKey((k) => k + 1);
+      toast({ title: "Upload successful", description: "Document uploaded and indexed.", variant: "success" });
     } catch (err) {
       console.error(err);
-      alert("Upload failed.");
+      toast({ title: "Upload failed", description: String((err as Error)?.message || "Try again."), variant: "error" });
     } finally {
       setSaving(false);
     }
@@ -892,11 +971,12 @@ function UploadPage() {
           <div className="grid md:grid-cols-2 gap-3">
             <div>
               <Label>Single File</Label>
-              <Input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+              <Input key={`single-${fileInputKey}`} type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
             </div>
             <div>
               <Label>Folder Upload</Label>
               <Input
+                key={`folder-${folderInputKey}`}
                 type="file"
                 multiple
                 // @ts-expect-error non-standard but supported by chromium
@@ -1280,6 +1360,7 @@ function VerifyPage() {
 }
 
 function AdminUsersPage() {
+  const toast = useAppToast();
   const [users, setUsers] = useState<Employee[]>([]);
   const [admins, setAdmins] = useState<any[]>([]);
   const [search, setSearch] = useState("");
@@ -1287,6 +1368,7 @@ function AdminUsersPage() {
   const [editingEmail, setEditingEmail] = useState("");
   const [editDept, setEditDept] = useState("");
   const [editLoc, setEditLoc] = useState("");
+  const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
 
   const [newUser, setNewUser] = useState({
     EmpID: "",
@@ -1317,6 +1399,7 @@ function AdminUsersPage() {
       body: JSON.stringify({ email: newAdmin }),
     });
     setNewAdmin("");
+    toast({ title: "Admin added", description: "User now has admin access.", variant: "success" });
     load();
   };
 
@@ -1327,6 +1410,7 @@ function AdminUsersPage() {
       body: JSON.stringify(newUser),
     });
     setNewUser({ EmpID: "", EmpName: "", EmpEmail: "", Department: "", Location: "", ReportingManagerID: "" });
+    toast({ title: "User created", description: "New user added successfully.", variant: "success" });
     load();
   };
 
@@ -1344,12 +1428,13 @@ function AdminUsersPage() {
       body: JSON.stringify({ Department: editDept, Location: editLoc }),
     });
     setEditingEmail("");
+    toast({ title: "User updated", description: "User profile fields updated.", variant: "success" });
     load();
   };
 
   const deleteUser = async (email: string) => {
-    if (!window.confirm(`Deactivate ${email}?`)) return;
     await api(`/api/admin/users/${encodeURIComponent(email)}`, { method: "DELETE" });
+    toast({ title: "User deactivated", description: `${email} has been deactivated.`, variant: "success" });
     load();
   };
 
@@ -1384,7 +1469,7 @@ function AdminUsersPage() {
                   <div className="text-muted-foreground">{u.EmpEmail} · {u.Department || u.Dept} · {u.Location || u.EmpLocation}</div>
                   <div className="flex gap-2 mt-2">
                     <Button size="sm" variant="outline" onClick={() => startEdit(u)}>Edit</Button>
-                    <Button size="sm" variant="destructive" onClick={() => deleteUser(u.EmpEmail)}>Deactivate</Button>
+                    <Button size="sm" variant="destructive" onClick={() => setDeleteCandidate(u.EmpEmail)}>Deactivate</Button>
                   </div>
                 </div>
               ))}
@@ -1400,6 +1485,18 @@ function AdminUsersPage() {
                 </div>
               </div>
             ) : null}
+            <ConfirmDialog
+              open={Boolean(deleteCandidate)}
+              title="Deactivate User"
+              description={`Deactivate ${deleteCandidate || ""}?`}
+              confirmLabel="Deactivate"
+              onCancel={() => setDeleteCandidate(null)}
+              onConfirm={async () => {
+                if (!deleteCandidate) return;
+                await deleteUser(deleteCandidate);
+                setDeleteCandidate(null);
+              }}
+            />
           </CardContent>
         </Card>
 
@@ -1428,6 +1525,7 @@ function AdminUsersPage() {
 }
 
 function HodsPage() {
+  const toast = useAppToast();
   const [list, setList] = useState<any[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [search, setSearch] = useState("");
@@ -1435,6 +1533,7 @@ function HodsPage() {
   const [department, setDepartment] = useState("");
   const [hodEmail, setHodEmail] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<number | null>(null);
 
   const [combos, setCombos] = useState<{ Location: string; Department: string }[]>([]);
   const [comboLocationSearch, setComboLocationSearch] = useState("");
@@ -1468,12 +1567,14 @@ function HodsPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ location, department, hodEmail, hodName: "" }),
       });
+      toast({ title: "HOD mapping updated", variant: "success" });
     } else {
       await api("/api/hods", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ location, department, hodEmail, hodName: "" }),
       });
+      toast({ title: "HOD mapping created", variant: "success" });
     }
     setLocation("");
     setDepartment("");
@@ -1491,8 +1592,8 @@ function HodsPage() {
   };
 
   const remove = async (id: number) => {
-    if (!window.confirm("Deactivate this HOD mapping?")) return;
     await api(`/api/hods/${id}`, { method: "DELETE" });
+    toast({ title: "HOD mapping deactivated", variant: "success" });
     if (editingId === id) {
       setEditingId(null);
       setLocation("");
@@ -1580,10 +1681,22 @@ function HodsPage() {
               <div className="flex items-center gap-2">
                 <Badge variant={r.Active ? "success" : "secondary"}>{r.Active ? "Active" : "Inactive"}</Badge>
                 <Button size="sm" variant="outline" onClick={() => startEdit(r)}>Edit</Button>
-                <Button size="sm" variant="destructive" onClick={() => remove(r.Id)}>Delete</Button>
+                <Button size="sm" variant="destructive" onClick={() => setDeleteCandidate(r.Id)}>Delete</Button>
               </div>
             </div>
           ))}
+          <ConfirmDialog
+            open={deleteCandidate !== null}
+            title="Deactivate HOD Mapping"
+            description="Deactivate this HOD mapping?"
+            confirmLabel="Deactivate"
+            onCancel={() => setDeleteCandidate(null)}
+            onConfirm={async () => {
+              if (deleteCandidate === null) return;
+              await remove(deleteCandidate);
+              setDeleteCandidate(null);
+            }}
+          />
         </CardContent>
       </Card>
     </div>
