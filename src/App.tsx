@@ -87,6 +87,7 @@ type Doc = {
   Description: string;
   FileName: string;
   CurrentVersion: number;
+  CurrentVersionLabel?: string;
   IsControlled: boolean;
   Status: string;
   ShareScope: string;
@@ -493,7 +494,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
             <GLBLogo />
           </div>
 
-          <div className="hidden lg:flex items-center gap-2 flex-1 overflow-x-auto px-2">
+          <div className="hidden md:flex items-center gap-2 flex-1 min-w-0 overflow-x-auto px-2">
             {navItems.map((item) => (
               <NavLink
                 key={item.to}
@@ -512,8 +513,10 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="hidden md:flex items-center gap-2 text-xs md:text-sm">
-            <Badge variant="info">{user?.department || "Department"}</Badge>
-            <Badge variant="secondary">{user?.location || "Location"}</Badge>
+            <div className="hidden xl:flex items-center gap-2">
+              <Badge variant="info">{user?.department || "Department"}</Badge>
+              <Badge variant="secondary">{user?.location || "Location"}</Badge>
+            </div>
             <Button variant="ghost" size="icon" onClick={logout} title="Logout">
               <LogOut className="h-4 w-4" />
             </Button>
@@ -621,8 +624,10 @@ function DashboardPage() {
   const [controlled, setControlled] = useState("all");
   const [department, setDepartment] = useState("");
   const [location, setLocation] = useState("");
+  const [expired, setExpired] = useState("all");
   const [selected, setSelected] = useState<Doc | null>(null);
   const [history, setHistory] = useState<any[]>([]);
+  const [docPermission, setDocPermission] = useState<{ canPrint: boolean; canDownload: boolean } | null>(null);
 
   const fetchDocs = async () => {
     setLoading(true);
@@ -632,6 +637,7 @@ function DashboardPage() {
       if (department) params.set("department", department);
       if (location) params.set("location", location);
       if (controlled !== "all") params.set("isControlled", String(controlled === "controlled"));
+      if (expired !== "all") params.set("expired", String(expired === "expired"));
       params.set("pageSize", "40");
       const data = await api<{ documents: Doc[]; total: number }>(`/api/documents?${params.toString()}`);
       setDocuments(data.documents || []);
@@ -655,10 +661,15 @@ function DashboardPage() {
   const openDoc = async (doc: Doc) => {
     setSelected(doc);
     try {
-      const logs = await api<{ logs: any[] }>(`/api/documents/${doc.Id}/audit`);
+      const [logs, permission] = await Promise.all([
+        api<{ logs: any[] }>(`/api/documents/${doc.Id}/audit`),
+        api<{ canPrint: boolean; canDownload: boolean }>(`/api/documents/${doc.Id}/permission`).catch(() => ({ canPrint: false, canDownload: false })),
+      ]);
       setHistory(logs.logs || []);
+      setDocPermission(permission);
     } catch {
       setHistory([]);
+      setDocPermission(null);
     }
   };
 
@@ -681,6 +692,14 @@ function DashboardPage() {
               <SelectItem value="uncontrolled">Not Controlled</SelectItem>
             </SelectContent>
           </Select>
+          <Select value={expired} onValueChange={setExpired}>
+            <SelectTrigger><SelectValue placeholder="Expiry filter" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Validity</SelectItem>
+              <SelectItem value="expired">Expired</SelectItem>
+              <SelectItem value="active">Not Expired</SelectItem>
+            </SelectContent>
+          </Select>
           <Button onClick={fetchDocs}>{loading ? "Searching..." : "Apply"}</Button>
         </CardContent>
       </Card>
@@ -700,7 +719,11 @@ function DashboardPage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.03 }}
           >
-            <Card className="glass hover:shadow-xl hover:-translate-y-1 transition-all duration-300" data-tour={index === 0 ? "dashboard-doc-card" : undefined}>
+            <Card
+              className="glass hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer"
+              data-tour={index === 0 ? "dashboard-doc-card" : undefined}
+              onClick={() => openDoc(doc)}
+            >
               <CardContent className="pt-6 space-y-2">
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -710,18 +733,14 @@ function DashboardPage() {
                   <Badge variant={doc.IsControlled ? "warning" : "secondary"}>{doc.IsControlled ? "Controlled" : "Open"}</Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Badge variant="outline">v{doc.CurrentVersion}</Badge>
+                  <Badge variant="outline">v{doc.CurrentVersionLabel || doc.CurrentVersion}</Badge>
                   <Badge variant="info">{doc.ApprovalStatus || "none"}</Badge>
                   {doc.HodSkipped ? <Badge variant="warning">HOD Skipped</Badge> : null}
                 </div>
                 <p className="text-sm text-muted-foreground line-clamp-2">{doc.Description || "No description"}</p>
                 <div className="flex gap-2 pt-1 flex-wrap">
-                  <Button variant="outline" onClick={() => openDoc(doc)}>Open</Button>
                   <a href={`/api/documents/${doc.Id}/view`} target="_blank" rel="noreferrer" className="inline-flex">
                     <Button variant="secondary">Inline View</Button>
-                  </a>
-                  <a href={`/api/documents/${doc.Id}/download`} target="_blank" rel="noreferrer" className="inline-flex">
-                    <Button>Download</Button>
                   </a>
                 </div>
               </CardContent>
@@ -737,7 +756,26 @@ function DashboardPage() {
             <CardDescription>Viewer + history timeline + public access links</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <iframe title="viewer" className="w-full h-[420px] rounded-xl border" src={`/api/documents/${selected.Id}/view`} />
+            <div
+              className="outline-none"
+              tabIndex={0}
+              onContextMenu={(e) => e.preventDefault()}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && ["c", "p", "s"].includes(e.key.toLowerCase())) e.preventDefault();
+              }}
+            >
+              <iframe
+                title="viewer"
+                className="w-full h-[420px] rounded-xl border"
+                src={`/api/documents/${selected.Id}/view`}
+                sandbox={docPermission?.canPrint ? "allow-same-origin allow-downloads" : "allow-same-origin"}
+              />
+            </div>
+            {docPermission ? (
+              <div className="text-xs text-muted-foreground">
+                Permission: {docPermission.canDownload ? "View + Print + Download" : docPermission.canPrint ? "View + Print" : "View Only"}
+              </div>
+            ) : null}
             <PublicLinksPanel docId={selected.Id} />
             <div>
               <h4 className="font-semibold mb-2">History</h4>
@@ -825,6 +863,8 @@ function UploadPage() {
   const [description, setDescription] = useState("");
   const [metadata, setMetadata] = useState("{}");
   const [isControlled, setIsControlled] = useState(false);
+  const [validFrom, setValidFrom] = useState("");
+  const [validTo, setValidTo] = useState("");
   const [shareScope, setShareScope] = useState("private");
   const [shareGroupId, setShareGroupId] = useState("");
   const [defaultAccessType, setDefaultAccessType] = useState("view_only");
@@ -832,17 +872,59 @@ function UploadPage() {
   const [perUserAccess, setPerUserAccess] = useState<Record<string, string>>({});
   const [groups, setGroups] = useState<any[]>([]);
   const [reason, setReason] = useState("");
+  const [existingDocs, setExistingDocs] = useState<Doc[]>([]);
+  const [newVersionBaseId, setNewVersionBaseId] = useState("__new__");
+  const [adhocSearch, setAdhocSearch] = useState("");
+  const [adhocEmployees, setAdhocEmployees] = useState<Employee[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [folderFiles, setFolderFiles] = useState<File[]>([]);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [folderInputKey, setFolderInputKey] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   useEffect(() => {
     api<any[]>("/api/share-groups").then(setGroups).catch(() => setGroups([]));
+    api<{ documents: Doc[] }>("/api/documents?isControlled=true&pageSize=200")
+      .then((r) => setExistingDocs(r.documents || []))
+      .catch(() => setExistingDocs([]));
   }, []);
 
   useEffect(() => {
+    const q = adhocSearch.trim();
+    if (!q || shareScope !== "selected_users") {
+      setAdhocEmployees([]);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      api<Employee[]>(`/api/employees/search?q=${encodeURIComponent(q)}`)
+        .then((r) => setAdhocEmployees(r || []))
+        .catch(() => setAdhocEmployees([]));
+    }, 200);
+    return () => window.clearTimeout(t);
+  }, [adhocSearch, shareScope]);
+
+  useEffect(() => {
+    const docFile = file || folderFiles[0];
+    if (!docFile) return;
+    if (metadata && metadata.trim() && metadata.trim() !== "{}") return;
+    const form = new FormData();
+    form.append("file", docFile);
+    api<{ extractedText: string }>("/api/documents/extract-metadata", {
+      method: "POST",
+      body: form,
+    })
+      .then((r) => {
+        if (r.extractedText) setMetadata(r.extractedText.slice(0, 3000));
+      })
+      .catch(() => {});
+  }, [file, folderFiles, metadata]);
+
+  useEffect(() => {
+    if (shareScope === "selected_users") {
+      setSharePreviewUsers((prev) => (prev.filter((u) => u.email !== user?.email)));
+      return;
+    }
     const q = new URLSearchParams();
     q.set("scope", shareScope);
     if (shareScope === "group" && shareGroupId) q.set("groupId", shareGroupId);
@@ -865,6 +947,33 @@ function UploadPage() {
       .catch(() => setSharePreviewUsers([]));
   }, [shareScope, shareGroupId, defaultAccessType]);
 
+  const postMultipartWithProgress = (url: string, form: FormData) =>
+    new Promise<any>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url, true);
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const p = Math.min(95, Math.round((e.loaded / e.total) * 95));
+          setUploadProgress(p);
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          setUploadProgress(100);
+          try {
+            resolve(JSON.parse(xhr.responseText || "{}"));
+          } catch {
+            resolve({});
+          }
+        } else {
+          reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("Network error"));
+      xhr.send(form);
+    });
+
   const doUpload = async (docFile: File, overrideTitle?: string) => {
     const form = new FormData();
     form.append("file", docFile);
@@ -885,7 +994,14 @@ function UploadPage() {
       )
     );
     if (reason) form.append("reason", reason);
-    await api("/api/documents/upload", { method: "POST", body: form });
+    form.append("validFrom", validFrom);
+    form.append("validTo", validTo);
+
+    if (newVersionBaseId && newVersionBaseId !== "__new__") {
+      await postMultipartWithProgress(`/api/documents/${newVersionBaseId}/new-version`, form);
+    } else {
+      await postMultipartWithProgress("/api/documents/upload", form);
+    }
   };
 
   const submit = async () => {
@@ -901,7 +1017,16 @@ function UploadPage() {
       toast({ title: "Reason required", description: "Controlled uploads require a revision reason.", variant: "info" });
       return;
     }
+    if (newVersionBaseId !== "__new__" && !reason.trim()) {
+      toast({ title: "Revision reason required", description: "New version upload requires a revision reason.", variant: "info" });
+      return;
+    }
+    if (!validFrom || !validTo) {
+      toast({ title: "Validity required", description: "Please provide valid from and valid to dates.", variant: "info" });
+      return;
+    }
     setSaving(true);
+    setUploadProgress(0);
     try {
       if (file) await doUpload(file);
       for (const f of folderFiles) {
@@ -912,6 +1037,7 @@ function UploadPage() {
       setReason("");
       setFile(null);
       setFolderFiles([]);
+      setNewVersionBaseId("__new__");
       setFileInputKey((k) => k + 1);
       setFolderInputKey((k) => k + 1);
       toast({ title: "Upload successful", description: "Document uploaded and indexed.", variant: "success" });
@@ -931,14 +1057,46 @@ function UploadPage() {
           <CardDescription>Upload single documents or entire folders with controlled/non-controlled workflow logic.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex items-center gap-2" data-tour="upload-controlled">
+            <Checkbox checked={isControlled} onCheckedChange={(v) => setIsControlled(Boolean(v))} id="controlled" />
+            <Label htmlFor="controlled">Requires Document Controller Approval (Controlled Copy)</Label>
+          </div>
+
           <div className="grid md:grid-cols-2 gap-3">
             <div>
               <Label>Title</Label>
               <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Document title" />
             </div>
+            {isControlled ? (
+              <div>
+                <Label>Revision Reason</Label>
+                <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Mandatory for controlled docs" />
+              </div>
+            ) : <div />}
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-3">
             <div>
-              <Label>Revision Reason</Label>
-              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Mandatory for controlled docs" />
+              <Label>Issue New Version Against Existing (Optional)</Label>
+              <Select value={newVersionBaseId} onValueChange={setNewVersionBaseId}>
+                <SelectTrigger><SelectValue placeholder="Create new document (default)" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__new__">Create New Document</SelectItem>
+                  {existingDocs.map((d) => (
+                    <SelectItem key={d.Id} value={String(d.Id)}>
+                      {d.Title} (v{d.CurrentVersionLabel || d.CurrentVersion})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Valid From</Label>
+              <Input type="date" value={validFrom} onChange={(e) => setValidFrom(e.target.value)} />
+            </div>
+            <div>
+              <Label>Valid To</Label>
+              <Input type="date" value={validTo} onChange={(e) => setValidTo(e.target.value)} />
             </div>
           </div>
 
@@ -952,11 +1110,6 @@ function UploadPage() {
             <textarea value={metadata} onChange={(e) => setMetadata(e.target.value)} className="w-full h-24 rounded-md border bg-background p-3 text-sm font-mono" />
           </div>
 
-          <div className="flex items-center gap-2" data-tour="upload-controlled">
-            <Checkbox checked={isControlled} onCheckedChange={(v) => setIsControlled(Boolean(v))} id="controlled" />
-            <Label htmlFor="controlled">Requires Document Controller Approval</Label>
-          </div>
-
           <div className="grid md:grid-cols-2 gap-3">
             <div>
               <Label>Share Scope</Label>
@@ -965,6 +1118,7 @@ function UploadPage() {
                 <SelectContent>
                   <SelectItem value="private">Private</SelectItem>
                   <SelectItem value="group">Custom Group</SelectItem>
+                  <SelectItem value="selected_users">Selected Employees</SelectItem>
                   <SelectItem value="department">Department</SelectItem>
                   <SelectItem value="company">Company</SelectItem>
                 </SelectContent>
@@ -984,6 +1138,50 @@ function UploadPage() {
               </div>
             ) : null}
           </div>
+
+          {shareScope === "selected_users" ? (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Share With Selected Employees</CardTitle>
+                <CardDescription>Search and add multiple employees directly (no group required).</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <Input
+                  placeholder="Search employee by name/email/emp id"
+                  value={adhocSearch}
+                  onChange={(e) => setAdhocSearch(e.target.value)}
+                />
+                <div className="max-h-28 overflow-auto border rounded-md text-sm">
+                  {adhocEmployees.map((e) => (
+                    <button
+                      key={e.EmpEmail}
+                      type="button"
+                      className="w-full text-left p-2 border-b hover:bg-muted"
+                      onClick={() => {
+                        setSharePreviewUsers((prev) => {
+                          if (prev.some((u) => u.email === e.EmpEmail.toLowerCase())) return prev;
+                          const next = [
+                            ...prev,
+                            {
+                              email: e.EmpEmail.toLowerCase(),
+                              name: e.EmpName || e.EmpEmail,
+                              empId: e.EmpID || null,
+                              department: (e.Department || e.Dept || "") as string,
+                              location: (e.Location || e.EmpLocation || "") as string,
+                            },
+                          ];
+                          return next;
+                        });
+                        setPerUserAccess((prev) => ({ ...prev, [e.EmpEmail.toLowerCase()]: defaultAccessType }));
+                      }}
+                    >
+                      {e.EmpName} ({e.EmpEmail})
+                    </button>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
 
           <div className="grid md:grid-cols-2 gap-3">
             <div>
@@ -1026,18 +1224,32 @@ function UploadPage() {
                         <div className="font-medium">{u.name}</div>
                         <div className="text-xs text-muted-foreground">{u.email} · {u.department} · {u.location}</div>
                       </div>
-                      <div className="w-52">
-                        <Select
-                          value={perUserAccess[u.email] || defaultAccessType}
-                          onValueChange={(value) => setPerUserAccess((prev) => ({ ...prev, [u.email]: value }))}
-                        >
-                          <SelectTrigger><SelectValue /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="view_only">View Only</SelectItem>
-                            <SelectItem value="view_print">View + Print</SelectItem>
-                            <SelectItem value="view_print_download">View + Print + Download</SelectItem>
-                          </SelectContent>
-                        </Select>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {[
+                          { key: "view_only", label: "View" },
+                          { key: "view_print", label: "View+Print" },
+                          { key: "view_print_download", label: "View+Print+Download" },
+                        ].map((opt) => (
+                          <label key={opt.key} className="text-xs inline-flex items-center gap-1 border rounded-full px-2 py-1">
+                            <Checkbox
+                              checked={(perUserAccess[u.email] || defaultAccessType) === opt.key}
+                              onCheckedChange={(v) => {
+                                if (!v) return;
+                                setPerUserAccess((prev) => ({ ...prev, [u.email]: opt.key }));
+                              }}
+                            />
+                            {opt.label}
+                          </label>
+                        ))}
+                        {shareScope === "selected_users" ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setSharePreviewUsers((prev) => prev.filter((x) => x.email !== u.email))}
+                          >
+                            Remove
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
                   ))
@@ -1049,7 +1261,7 @@ function UploadPage() {
           <div className="grid md:grid-cols-2 gap-3">
             <div>
               <Label>Single File</Label>
-              <Input key={`single-${fileInputKey}`} type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+              <Input key={`single-${fileInputKey}`} type="file" accept=".doc,.docx,.xls,.xlsx,.pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} />
             </div>
             <div>
               <Label>Folder Upload</Label>
@@ -1057,12 +1269,24 @@ function UploadPage() {
                 key={`folder-${folderInputKey}`}
                 type="file"
                 multiple
+                accept=".doc,.docx,.xls,.xlsx,.pdf"
                 // @ts-expect-error non-standard but supported by chromium
                 webkitdirectory="true"
                 onChange={(e) => setFolderFiles(Array.from(e.target.files || []))}
               />
             </div>
           </div>
+
+          {saving ? (
+            <div className="space-y-1">
+              <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
+                <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Upload progress: {uploadProgress}% {uploadProgress < 100 ? "(saving to server...)" : "(saved)"}
+              </p>
+            </div>
+          ) : null}
 
           <div className="flex gap-2 flex-wrap">
             <Button onClick={submit} disabled={saving} data-tour="upload-submit">{saving ? "Uploading..." : "Upload"}</Button>

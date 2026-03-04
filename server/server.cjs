@@ -126,6 +126,7 @@ async function ensureTables() {
           FileSize BIGINT,
           MimeType NVARCHAR(256),
           CurrentVersion INT DEFAULT 1,
+          CurrentVersionLabel NVARCHAR(20) DEFAULT '1.0',
           IsControlled BIT DEFAULT 0,
           Status NVARCHAR(50) DEFAULT 'active',
           ShareScope NVARCHAR(50) DEFAULT 'private',
@@ -141,6 +142,9 @@ async function ensureTables() {
           HodSkipped BIT DEFAULT 0,
           SearchContent NVARCHAR(MAX),
           MetadataJson NVARCHAR(MAX),
+          ValidFrom DATE NULL,
+          ValidTo DATE NULL,
+          ValidityReminderSentAt DATETIME2 NULL,
           CreatedAt DATETIME2 DEFAULT SYSUTCDATETIME(),
           UpdatedAt DATETIME2 DEFAULT SYSUTCDATETIME(),
           CONSTRAINT FK_DmsDocuments_Parent FOREIGN KEY (ParentDocId) REFERENCES DmsDocuments(Id)
@@ -157,6 +161,14 @@ async function ensureTables() {
       BEGIN
         IF COL_LENGTH('DmsDocuments', 'MetadataJson') IS NULL
           ALTER TABLE DmsDocuments ADD MetadataJson NVARCHAR(MAX) NULL;
+        IF COL_LENGTH('DmsDocuments', 'CurrentVersionLabel') IS NULL
+          ALTER TABLE DmsDocuments ADD CurrentVersionLabel NVARCHAR(20) NULL;
+        IF COL_LENGTH('DmsDocuments', 'ValidFrom') IS NULL
+          ALTER TABLE DmsDocuments ADD ValidFrom DATE NULL;
+        IF COL_LENGTH('DmsDocuments', 'ValidTo') IS NULL
+          ALTER TABLE DmsDocuments ADD ValidTo DATE NULL;
+        IF COL_LENGTH('DmsDocuments', 'ValidityReminderSentAt') IS NULL
+          ALTER TABLE DmsDocuments ADD ValidityReminderSentAt DATETIME2 NULL;
       END
     `);
 
@@ -457,6 +469,12 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+  fileFilter: (_req, file, cb) => {
+    if (!isAllowedExtension(file.originalname)) {
+      return cb(new Error("Unsupported file type. Allowed: .docx, .doc, .xlsx, .xls, .pdf"));
+    }
+    cb(null, true);
+  },
 });
 
 function computeFileHash(filePath) {
@@ -507,6 +525,19 @@ function normalizeAccessType(v) {
   const value = String(v || "").trim().toLowerCase();
   if (ACCESS_TYPES.has(value)) return value;
   return "view_only";
+}
+
+const ALLOWED_EXTS = new Set([".docx", ".doc", ".xlsx", ".xls", ".pdf"]);
+function isAllowedExtension(filename = "") {
+  const ext = path.extname(String(filename || "")).toLowerCase();
+  return ALLOWED_EXTS.has(ext);
+}
+
+function sequenceToVersionLabel(seq) {
+  const n = Math.max(1, Number(seq || 1));
+  const major = Math.floor((n - 1) / 10) + 1;
+  const minor = (n - 1) % 10;
+  return `${major}.${minor}`;
 }
 
 async function getEmpContextByEmail(email) {
@@ -755,6 +786,19 @@ app.get("/api/employees/search", requireAuth, async (req, res) => {
 
 // ─── 7C. DOCUMENTS ─────────────────────────────────────────────
 
+// POST /api/documents/extract-metadata
+app.post("/api/documents/extract-metadata", requireAuth, upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const text = extractSearchContent(req.file.path, "").slice(0, 6000);
+    fs.unlink(req.file.path, () => {});
+    res.json({ extractedText: text });
+  } catch (err) {
+    console.error("[ExtractMetadata] error:", err.message);
+    res.status(500).json({ error: "Failed to extract metadata" });
+  }
+});
+
 // POST /api/documents/upload
 app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req, res) => {
   try {
@@ -762,9 +806,15 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const { title, description, isControlled, shareScope, shareGroupId, reason, metadata, defaultAccessType, accessControl } = req.body;
+    const { title, description, isControlled, shareScope, shareGroupId, reason, metadata, defaultAccessType, accessControl, validFrom, validTo } = req.body;
     if (!title) {
       return res.status(400).json({ error: "Title is required" });
+    }
+    if (!validFrom || !validTo) {
+      return res.status(400).json({ error: "Validity dates (from/to) are required" });
+    }
+    if (new Date(validTo) < new Date(validFrom)) {
+      return res.status(400).json({ error: "Validity end date must be after start date" });
     }
 
     const filePath = req.file.path;
@@ -795,6 +845,7 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       .input("status", sql.NVarChar, status)
       .input("shareScope", sql.NVarChar, shareScope || "private")
       .input("shareGroupId", sql.Int, shareGroupId ? Number(shareGroupId) : null)
+      .input("currentVersionLabel", sql.NVarChar, sequenceToVersionLabel(1))
       .input("creatorEmail", sql.NVarChar, req.user.email)
       .input("creatorEmpId", sql.NVarChar, emp.EmpID || null)
       .input("department", sql.NVarChar, emp.Dept || null)
@@ -803,14 +854,16 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       .input("approvalStatus", sql.NVarChar, approvalStatus)
       .input("searchContent", sql.NVarChar, searchContent)
       .input("metadataJson", sql.NVarChar, metadataText || null)
+      .input("validFrom", sql.Date, validFrom)
+      .input("validTo", sql.Date, validTo)
       .query(`
         INSERT INTO DmsDocuments
-          (Title, Description, FileName, FilePath, FileSize, MimeType, IsControlled, Status, ShareScope, ShareGroupId,
-           CreatorEmail, CreatorEmpId, Department, Location, FileHash, ApprovalStatus, SearchContent, MetadataJson)
+          (Title, Description, FileName, FilePath, FileSize, MimeType, IsControlled, Status, ShareScope, ShareGroupId, CurrentVersionLabel,
+           CreatorEmail, CreatorEmpId, Department, Location, FileHash, ApprovalStatus, SearchContent, MetadataJson, ValidFrom, ValidTo)
         OUTPUT INSERTED.Id
         VALUES
-          (@title, @description, @fileName, @filePath, @fileSize, @mimeType, @isControlled, @status, @shareScope, @shareGroupId,
-           @creatorEmail, @creatorEmpId, @department, @location, @fileHash, @approvalStatus, @searchContent, @metadataJson)
+          (@title, @description, @fileName, @filePath, @fileSize, @mimeType, @isControlled, @status, @shareScope, @shareGroupId, @currentVersionLabel,
+           @creatorEmail, @creatorEmpId, @department, @location, @fileHash, @approvalStatus, @searchContent, @metadataJson, @validFrom, @validTo)
       `);
 
     const docId = insertResult.recordset[0].Id;
@@ -844,7 +897,6 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
         WHEN NOT MATCHED THEN INSERT (DocId, Email, AccessType) VALUES (@docId, @email, 'owner');
       `);
 
-    const scopeUsers = await getScopeUsers(shareScope || "private", shareGroupId, req.user.email);
     let perUser = [];
     try {
       if (accessControl) {
@@ -858,6 +910,12 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
         .filter((x) => x && x.email)
         .map((x) => [String(x.email).toLowerCase(), normalizeAccessType(x.accessType)])
     );
+    let scopeUsers = [];
+    if (String(shareScope || "").toLowerCase() === "selected_users") {
+      scopeUsers = Array.from(perUserMap.keys()).map((email) => ({ EmpEmail: email }));
+    } else {
+      scopeUsers = await getScopeUsers(shareScope || "private", shareGroupId, req.user.email);
+    }
     const defaultType = normalizeAccessType(defaultAccessType || "view_only");
     for (const member of scopeUsers) {
       const email = String(member.EmpEmail || "").trim().toLowerCase();
@@ -875,6 +933,17 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
           WHEN MATCHED THEN UPDATE SET AccessType=@accessType
           WHEN NOT MATCHED THEN INSERT (DocId, Email, AccessType) VALUES (@docId, @email, @accessType);
         `);
+    }
+
+    const sharedWith = scopeUsers
+      .map((x) => String(x.EmpEmail || "").trim().toLowerCase())
+      .filter((x) => x && x !== String(req.user.email).toLowerCase());
+    if (sharedWith.length > 0) {
+      sendEmail(
+        sharedWith,
+        `[DMS] New Document Shared: ${title}`,
+        `<h3>Document Shared</h3><p>A document has been shared with you.</p><p><strong>Title:</strong> ${title}</p><p><strong>Shared by:</strong> ${req.user.email}</p>`
+      );
     }
 
     // If controlled, create approval for reporting manager
@@ -927,6 +996,7 @@ app.get("/api/documents", requireAuth, async (req, res) => {
       page = 1, pageSize = 20,
       startDate, endDate, creator, version, approver,
       revisionDateFrom, revisionDateTo, title,
+      expired,
     } = req.query;
 
     const pageNum = Math.max(1, Number(page));
@@ -1019,6 +1089,12 @@ app.get("/api/documents", requireAuth, async (req, res) => {
     if (approver) {
       request.input("approver", sql.NVarChar, approver);
       whereClauses.push("EXISTS (SELECT 1 FROM DmsApprovals a WHERE a.DocId = d.Id AND a.ApproverEmail = @approver)");
+    }
+    if (expired === "true") {
+      whereClauses.push("d.ValidTo IS NOT NULL AND d.ValidTo < CAST(SYSUTCDATETIME() AS DATE)");
+    }
+    if (expired === "false") {
+      whereClauses.push("(d.ValidTo IS NULL OR d.ValidTo >= CAST(SYSUTCDATETIME() AS DATE))");
     }
 
     const whereStr = whereClauses.join(" AND ");
@@ -1378,9 +1454,18 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
     }
 
     const newVersion = doc.CurrentVersion + 1;
+    const newVersionLabel = sequenceToVersionLabel(newVersion);
     const filePath = req.file.path;
     const fileHash = await computeFileHash(filePath);
-    const { reason, metadata } = req.body;
+    const { reason, metadata, validFrom, validTo } = req.body;
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ error: "Revision reason is required for controlled versioning" });
+    }
+    const resolvedValidFrom = validFrom || doc.ValidFrom;
+    const resolvedValidTo = validTo || doc.ValidTo;
+    if (!resolvedValidFrom || !resolvedValidTo) {
+      return res.status(400).json({ error: "Validity dates (from/to) are required" });
+    }
 
     // Mark old document as obsolete
     const obsoletePath = moveFileToObsolete(doc.FilePath);
@@ -1410,6 +1495,7 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
       .input("fileSize", sql.BigInt, req.file.size)
       .input("mimeType", sql.NVarChar, req.file.mimetype)
       .input("currentVersion", sql.Int, newVersion)
+      .input("currentVersionLabel", sql.NVarChar, newVersionLabel)
       .input("isControlled", sql.Bit, 1)
       .input("status", sql.NVarChar, "pending_approval")
       .input("shareScope", sql.NVarChar, doc.ShareScope)
@@ -1423,16 +1509,18 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
       .input("approvalStatus", sql.NVarChar, "pending_rm")
       .input("searchContent", sql.NVarChar, searchContent)
       .input("metadataJson", sql.NVarChar, metadataText || doc.MetadataJson || null)
+      .input("validFrom", sql.Date, resolvedValidFrom)
+      .input("validTo", sql.Date, resolvedValidTo)
       .query(`
         INSERT INTO DmsDocuments
           (Title, Description, FileName, FilePath, FileSize, MimeType, CurrentVersion, IsControlled,
            Status, ShareScope, ShareGroupId, CreatorEmail, CreatorEmpId, Department, Location,
-           FileHash, ParentDocId, ApprovalStatus, SearchContent, MetadataJson)
+           FileHash, ParentDocId, ApprovalStatus, SearchContent, MetadataJson, CurrentVersionLabel, ValidFrom, ValidTo)
         OUTPUT INSERTED.Id
         VALUES
           (@title, @description, @fileName, @filePath, @fileSize, @mimeType, @currentVersion, @isControlled,
            @status, @shareScope, @shareGroupId, @creatorEmail, @creatorEmpId, @department, @location,
-           @fileHash, @parentDocId, @approvalStatus, @searchContent, @metadataJson)
+           @fileHash, @parentDocId, @approvalStatus, @searchContent, @metadataJson, @currentVersionLabel, @validFrom, @validTo)
       `);
 
     const newDocId = insertResult.recordset[0].Id;
@@ -2892,10 +2980,49 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
+async function runValidityReminderJob() {
+  try {
+    const docs = await dmsPool.request().query(`
+      SELECT Id, Title, CreatorEmail, ValidTo
+      FROM DmsDocuments
+      WHERE Status != 'deleted'
+        AND ValidTo IS NOT NULL
+        AND ValidTo >= CAST(SYSUTCDATETIME() AS DATE)
+        AND ValidTo <= DATEADD(DAY, 30, CAST(SYSUTCDATETIME() AS DATE))
+        AND ValidityReminderSentAt IS NULL
+    `);
+    for (const d of docs.recordset) {
+      const access = await dmsPool.request().input("docId", sql.Int, d.Id)
+        .query("SELECT Email FROM DmsDocAccess WHERE DocId = @docId");
+      const recipients = Array.from(new Set([d.CreatorEmail, ...access.recordset.map((x) => x.Email)].filter(Boolean)));
+      if (recipients.length) {
+        await sendEmail(
+          recipients,
+          `[DMS] Document Validity Expiring: ${d.Title}`,
+          `<h3>Validity Reminder</h3><p><strong>${d.Title}</strong> is expiring on <strong>${new Date(d.ValidTo).toLocaleDateString("en-GB")}</strong>.</p><p>Please review and renew if required.</p>`
+        );
+      }
+      await dmsPool.request().input("docId", sql.Int, d.Id)
+        .query("UPDATE DmsDocuments SET ValidityReminderSentAt = SYSUTCDATETIME() WHERE Id = @docId");
+    }
+  } catch (err) {
+    console.error("[ValidityReminderJob] error:", err.message);
+  }
+}
+
+app.post("/api/admin/validity-reminders/run", requireAdmin, async (_req, res) => {
+  await runValidityReminderJob();
+  res.json({ ok: true });
+});
+
 // ─── 11. HTTPS SERVER BOOT ─────────────────────────────────────
 async function boot() {
   await initPools();
   await ensureTables();
+  await runValidityReminderJob();
+  setInterval(() => {
+    runValidityReminderJob().catch(() => {});
+  }, 6 * 60 * 60 * 1000);
 
   try {
     const httpsOptions = {
