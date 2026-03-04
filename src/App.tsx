@@ -387,16 +387,17 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: "100%", opacity: 0.9 }}
             transition={{ duration: 0.45, ease: [0.2, 0.8, 0.2, 1] }}
-            className="fixed inset-0 z-50 text-white"
-            style={{ background: "linear-gradient(180deg, #050b18 0%, #0a1530 55%, #0f1f3f 100%)", color: "#ffffff" }}
+            className="fixed inset-0 z-[120] text-white"
           >
-            <div className="h-full w-full p-6 flex flex-col">
+            <div className="absolute inset-0 bg-gradient-to-b from-[#004b8d] via-[#007f6d] to-[#f08a24]" />
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_15%,rgba(255,255,255,0.25),transparent_34%),radial-gradient(circle_at_85%_80%,rgba(255,255,255,0.18),transparent_38%)]" />
+            <div className="relative h-full w-full p-6 flex flex-col text-white">
               <div className="flex items-center justify-between mb-8">
                 <div>
-                  <h2 className="font-display text-5xl tracking-wide">Menu</h2>
-                  <p className="text-white/70 text-sm">Navigate your DMS workspace</p>
+                  <h2 className="font-display text-5xl tracking-wide drop-shadow-lg">Menu</h2>
+                  <p className="text-white/90 text-sm">Navigate your DMS workspace</p>
                 </div>
-                <Button variant="ghost" size="icon" className="text-white hover:bg-white/10" onClick={() => setMobileOpen(false)}>
+                <Button variant="ghost" size="icon" className="!text-white hover:!bg-white/15 transition-all duration-300 hover:rotate-90" onClick={() => setMobileOpen(false)}>
                   <X className="h-6 w-6" />
                 </Button>
               </div>
@@ -412,7 +413,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
                     <NavLink
                       to={item.to}
                       onClick={() => setMobileOpen(false)}
-                      className="block rounded-2xl border border-white/35 px-5 py-4 text-xl bg-white/5 text-white hover:bg-white/15 transition"
+                      className="block rounded-2xl border border-white/45 px-5 py-4 text-xl bg-white/15 text-white shadow-lg backdrop-blur-md hover:bg-white/25 hover:translate-x-1 hover:scale-[1.01] transition-all duration-300"
                     >
                       {item.label}
                     </NavLink>
@@ -420,11 +421,11 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
                 ))}
               </div>
 
-              <div className="pt-4 border-t border-white/20 space-y-3">
-                <div className="text-sm text-white/80">{user?.email}</div>
+              <div className="pt-4 border-t border-white/35 space-y-3">
+                <div className="text-sm text-white">{user?.email}</div>
                 <div className="flex gap-2">
-                  <Button className="flex-1 !bg-white !text-slate-900 hover:!bg-white/90" onClick={() => { setMobileOpen(false); navigate("/upload"); }}>New Document</Button>
-                  <Button className="flex-1 !text-white !border !border-white/40 hover:!bg-white/10" variant="ghost" onClick={logout}>Logout</Button>
+                  <Button className="flex-1 !bg-white !text-[#004b8d] hover:!bg-white/90 hover:scale-[1.02] transition-all" onClick={() => { setMobileOpen(false); navigate("/upload"); }}>New Document</Button>
+                  <Button className="flex-1 !text-white !border !border-white/60 hover:!bg-white/15 hover:scale-[1.02] transition-all" variant="ghost" onClick={logout}>Logout</Button>
                 </div>
               </div>
             </div>
@@ -444,10 +445,13 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
         {children}
       </main>
 
-      <footer className="mt-auto border-t border-border/60 bg-background/80 backdrop-blur-xl sticky bottom-0">
-        <div className="w-full px-3 md:px-8 py-4 text-xs text-muted-foreground flex justify-between">
-          <span>Secure DMS Platform</span>
-          <span>Copyright {new Date().getFullYear()} Premier Energies</span>
+      <footer className="mt-auto border-t border-border/60 bg-background/85 backdrop-blur-xl sticky bottom-0">
+        <div className="w-full px-3 md:px-8 py-3 text-xs text-muted-foreground flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <img src="/l.png" alt="Premier Energies logo" className="h-7 w-auto" />
+            <span>Secure DMS Platform</span>
+          </div>
+          <span>© {new Date().getFullYear()} Premier Energies. All Rights Reserved.</span>
         </div>
       </footer>
 
