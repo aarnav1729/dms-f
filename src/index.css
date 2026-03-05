@@ -28,14 +28,26 @@
     --radius: 0.5rem;
     --spotlight-x: 50%;
     --spotlight-y: 35%;
+    --brand-blue: #005499;
+    --brand-teal: #007f6d;
+    --brand-amber: #f08a24;
   }
 
   * {
     @apply border-border;
   }
 
+  html {
+    scroll-behavior: smooth;
+  }
+
   body {
     @apply bg-background text-foreground font-sans antialiased;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(1200px 800px at -8% -12%, rgba(0, 84, 153, 0.10), transparent 55%),
+      radial-gradient(1100px 760px at 110% 105%, rgba(0, 127, 109, 0.09), transparent 60%),
+      linear-gradient(180deg, #f3f8fc 0%, #fafaf6 48%, #f7f9fc 100%);
   }
 }
 
@@ -64,7 +76,9 @@
 
 /* Background decorative gradients */
 .bg-page-gradient {
-  background: linear-gradient(to bottom, #f3f8fc, #faf9f4, hsl(var(--background)));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.68) 0%, rgba(247, 250, 255, 0.78) 55%, rgba(251, 252, 246, 0.88) 100%),
+    linear-gradient(to bottom, #f3f8fc, #faf9f4, hsl(var(--background)));
 }
 
 /* Scrollbar */
@@ -87,6 +101,14 @@
   background: hsl(var(--card) / 0.55);
   backdrop-filter: blur(40px);
   border: 1px solid hsl(var(--border) / 0.70);
+  box-shadow: 0 14px 42px rgba(2, 18, 40, 0.07);
+}
+
+.glass-strong {
+  background: hsl(var(--card) / 0.82);
+  backdrop-filter: blur(28px);
+  border: 1px solid hsl(var(--border) / 0.9);
+  box-shadow: 0 18px 46px rgba(2, 18, 40, 0.12);
 }
 
 /* Grid pattern overlay */
@@ -96,6 +118,78 @@
     linear-gradient(to bottom, hsl(var(--foreground)) 1px, transparent 1px);
   background-size: 64px 64px;
   opacity: 0.04;
+}
+
+.content-wrap {
+  width: min(1620px, 100% - 1.5rem);
+  margin-inline: auto;
+}
+
+@media (min-width: 768px) {
+  .content-wrap {
+    width: min(1620px, 100% - 3rem);
+  }
+}
+
+.section-enter {
+  animation: section-enter 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes section-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.interactive-lift {
+  transition: transform 260ms ease, box-shadow 260ms ease, border-color 260ms ease;
+}
+
+.interactive-lift:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(1, 24, 56, 0.12);
+  border-color: hsl(var(--primary) / 0.35);
+}
+
+.nav-chip {
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border) / 0.8);
+  background: hsl(var(--card) / 0.55);
+  padding: 0.5rem 0.9rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: hsl(var(--foreground) / 0.9);
+  transition: all 240ms ease;
+}
+
+.nav-chip:hover {
+  transform: translateY(-1px);
+  background: linear-gradient(120deg, rgba(0, 84, 153, 0.11), rgba(0, 127, 109, 0.08));
+  border-color: rgba(0, 84, 153, 0.28);
+}
+
+.nav-chip.active {
+  color: white;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--brand-blue), var(--brand-teal));
+  box-shadow: 0 10px 24px rgba(0, 84, 153, 0.34);
+}
+
+.page-title {
+  font-size: clamp(1.2rem, 1.4vw, 1.65rem);
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+
+.subtle-rule {
+  height: 1px;
+  width: 100%;
+  background: linear-gradient(90deg, transparent, rgba(0, 84, 153, 0.22), transparent);
 }
 
 /* Tamper proof stamp */

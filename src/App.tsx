@@ -488,9 +488,9 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
       <MouseGlow />
       <div className="grid-pattern fixed inset-0 pointer-events-none" />
 
-      <header className="sticky top-0 z-40 backdrop-blur-xl border-b border-border/60 bg-background/70">
-        <div className="w-full px-3 md:px-8 py-3 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+      <header className="sticky top-0 z-40 backdrop-blur-xl border-b border-border/60 bg-background/75">
+        <div className="content-wrap py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 shrink-0">
             <GLBLogo />
           </div>
 
@@ -500,11 +500,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
                 key={item.to}
                 to={item.to}
                 className={({ isActive }) =>
-                  `px-3 py-1.5 rounded-full border text-sm whitespace-nowrap transition ${
-                    isActive
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "border-border hover:bg-card"
-                  }`
+                  `nav-chip whitespace-nowrap ${isActive ? "active" : ""}`
                 }
               >
                 {item.label}
@@ -512,7 +508,10 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
             ))}
           </div>
 
-          <div className="hidden md:flex items-center gap-2 text-xs md:text-sm">
+          <div className="hidden md:flex items-center gap-2 text-xs md:text-sm shrink-0">
+            <Button variant="outline" className="hidden lg:inline-flex interactive-lift" onClick={() => navigate("/upload")}>
+              New Document
+            </Button>
             <div className="hidden xl:flex items-center gap-2">
               <Badge variant="info">{user?.department || "Department"}</Badge>
               <Badge variant="secondary">{user?.location || "Location"}</Badge>
@@ -583,7 +582,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
         ) : null}
       </AnimatePresence>
 
-      <main className="w-full px-3 md:px-8 py-6 relative z-10 flex-1">
+      <main className="content-wrap py-6 relative z-10 flex-1 section-enter">
         <div className="mb-6 hidden md:flex lg:hidden flex-wrap gap-2">
           <Button variant="outline" onClick={() => setMobileOpen(true)}>Menu</Button>
           <Button variant="outline" onClick={() => navigate("/upload")}>New Document</Button>
@@ -591,11 +590,11 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
         {children}
       </main>
 
-      <footer className="mt-auto border-t border-border/60 bg-background/85 backdrop-blur-xl sticky bottom-0">
-        <div className="w-full px-3 md:px-8 py-3 text-xs text-muted-foreground flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+      <footer className="mt-auto border-t border-border/60 bg-background/90 backdrop-blur-xl">
+        <div className="content-wrap py-3 text-xs text-muted-foreground flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
             <img src="/l.png" alt="Premier Energies logo" className="h-7 w-auto" />
-            <div>
+            <div className="min-w-0">
               <p className="text-sm font-semibold text-foreground">Premier DMS</p>
               <p className="text-xs text-muted-foreground hidden sm:block">Secure enterprise document operations</p>
             </div>
@@ -798,8 +797,23 @@ function DashboardPage() {
   }, [selected]);
 
   return (
-    <div className="space-y-4 animate-fade-in">
-      <Card className="glass" data-tour="dashboard-search">
+    <div className="space-y-5 animate-fade-in">
+      <Card className="glass-strong interactive-lift">
+        <CardContent className="pt-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="page-title">Document Workspace</p>
+              <p className="text-sm text-muted-foreground">Search, view, manage permissions, and trace full history from one place.</p>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={fetchDocs}>Refresh</Button>
+              <Button onClick={() => window.location.assign("/upload")}>Upload New</Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="glass interactive-lift" data-tour="dashboard-search">
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><Search className="h-5 w-5" />Search & Advanced Filters</CardTitle>
           <CardDescription>Search metadata, content, title, creator, location and document controller flow status.</CardDescription>
@@ -828,7 +842,7 @@ function DashboardPage() {
         </CardContent>
       </Card>
 
-      <div className="grid md:grid-cols-4 gap-3">
+      <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
         <Stat title="Documents" value={String(total)} icon={<FileArchive className="h-5 w-5" />} />
         <Stat title="Controlled" value={String(documents.filter((d) => d.IsControlled).length)} icon={<ShieldCheck className="h-5 w-5" />} />
         <Stat title="Pending" value={String(documents.filter((d) => d.ApprovalStatus?.startsWith("pending")).length)} icon={<Clock3 className="h-5 w-5" />} />
@@ -844,7 +858,7 @@ function DashboardPage() {
             transition={{ delay: index * 0.03 }}
           >
             <Card
-              className="glass hover:shadow-xl hover:-translate-y-1 transition-all duration-300 cursor-pointer"
+              className="glass interactive-lift cursor-pointer"
               data-tour={index === 0 ? "dashboard-doc-card" : undefined}
               onClick={() => openDoc(doc)}
             >
@@ -1339,8 +1353,8 @@ function UploadPage() {
   };
 
   return (
-    <div className="grid xl:grid-cols-3 gap-4 animate-fade-in">
-      <Card className="xl:col-span-2 glass">
+    <div className="grid xl:grid-cols-3 gap-5 animate-fade-in section-enter">
+      <Card className="xl:col-span-2 glass-strong interactive-lift">
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><FileUp className="h-5 w-5" />Document Upload</CardTitle>
           <CardDescription>Upload single documents or entire folders with controlled/non-controlled workflow logic.</CardDescription>
@@ -1577,7 +1591,7 @@ function UploadPage() {
         </CardContent>
       </Card>
 
-      <Card className="glass">
+      <Card className="glass interactive-lift">
         <CardHeader>
           <CardTitle>Workflow Rules</CardTitle>
         </CardHeader>
