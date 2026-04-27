@@ -17,6 +17,7 @@ export interface User {
   reportingManagerEmail?: string | null;
   reportingManagerName?: string | null;
   isAdmin: boolean;
+  canUpload?: boolean;
 }
 
 interface AuthContextType {
@@ -91,6 +92,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         reportingManagerEmail: "dev.manager@premierenergies.com",
         reportingManagerName: "Dev Manager",
         isAdmin: DEV_BYPASS_ADMIN,
+        canUpload: true,
       });
       setLoading(false);
       setError(null);
@@ -137,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         reportingManagerEmail: data.reportingManagerEmail || null,
         reportingManagerName: data.reportingManagerName || null,
         isAdmin: Boolean(data.isAdmin),
+        canUpload: Boolean(data.canUpload || data.isAdmin),
       });
     } catch (err) {
       console.error("Auth session error:", err);

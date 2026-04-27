@@ -28,6 +28,10 @@ const HOST = process.env.HOST || "0.0.0.0";
 const DEV_BYPASS_AUTH = String(process.env.DMS_DEV_BYPASS_AUTH || "").toLowerCase() === "true";
 const DEV_BYPASS_ADMIN = String(process.env.DMS_DEV_BYPASS_ADMIN || "").toLowerCase() === "true";
 const DEV_BYPASS_EMAIL = process.env.DMS_DEV_EMAIL || "aarnav.singh@premierenergies.com";
+const PREMIER_DOMAIN = "@premierenergies.com";
+const UPLOADER_SEED_EMAIL = "aarnav.singh@premierenergies.com";
+const MD_NAME = process.env.DMS_MD_NAME || "chiranjeev singh";
+const MD_DESIGNATION = process.env.DMS_MD_DESIGNATION || "managing director";
 const AUTH_PUBLIC_KEY = fs.readFileSync(
   path.resolve(__dirname, "../", process.env.AUTH_PUBLIC_KEY_FILE || "./server/keys/auth-public.pem"),
   "utf8"
@@ -75,18 +79,34 @@ const spotConfig = {
 let dmsPool;
 let spotPool;
 
+function normaliseEmail(value = "") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  return raw.includes("@") ? raw : `${raw}${PREMIER_DOMAIN}`;
+}
+
+function isPremierEmail(value = "") {
+  return normaliseEmail(value).endsWith(PREMIER_DOMAIN);
+}
+
+function asBool(value) {
+  return value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true";
+}
+
 async function initPools() {
   try {
     dmsPool = await new sql.ConnectionPool(dmsConfig).connect();
     console.log("[DB] DMS pool connected");
   } catch (err) {
     console.error("[DB] DMS pool error:", err.message);
+    throw err;
   }
   try {
     spotPool = await new sql.ConnectionPool(spotConfig).connect();
     console.log("[DB] SPOT pool connected");
   } catch (err) {
     console.error("[DB] SPOT pool error:", err.message);
+    throw err;
   }
 }
 
@@ -169,6 +189,36 @@ async function ensureTables() {
           ALTER TABLE DmsDocuments ADD ValidTo DATE NULL;
         IF COL_LENGTH('DmsDocuments', 'ValidityReminderSentAt') IS NULL
           ALTER TABLE DmsDocuments ADD ValidityReminderSentAt DATETIME2 NULL;
+        IF COL_LENGTH('DmsDocuments', 'ApprovalRequired') IS NULL
+          ALTER TABLE DmsDocuments ADD ApprovalRequired BIT NOT NULL CONSTRAINT DF_DmsDocuments_ApprovalRequired DEFAULT(0);
+        IF COL_LENGTH('DmsDocuments', 'ApprovalRouteJson') IS NULL
+          ALTER TABLE DmsDocuments ADD ApprovalRouteJson NVARCHAR(MAX) NULL;
+        IF COL_LENGTH('DmsDocuments', 'ApprovedAt') IS NULL
+          ALTER TABLE DmsDocuments ADD ApprovedAt DATETIME2 NULL;
+      END
+    `);
+
+    // DmsUploaderPolicy: the actual "who may upload" gate. Everyone else is view-only.
+    await dmsPool.request().query(`
+      IF OBJECT_ID('DmsUploaderPolicy','U') IS NULL
+      BEGIN
+        CREATE TABLE DmsUploaderPolicy (
+          Email NVARCHAR(256) NOT NULL PRIMARY KEY,
+          EmpID NVARCHAR(64) NULL,
+          EmpName NVARCHAR(256) NULL,
+          Department NVARCHAR(256) NULL,
+          Location NVARCHAR(256) NULL,
+          Source NVARCHAR(80) NOT NULL,
+          ApprovalRequired BIT NOT NULL CONSTRAINT DF_DmsUploaderPolicy_ApprovalRequired DEFAULT(1),
+          ApproverEmail NVARCHAR(256) NULL,
+          ApproverName NVARCHAR(256) NULL,
+          Active BIT NOT NULL CONSTRAINT DF_DmsUploaderPolicy_Active DEFAULT(1),
+          SeededAt DATETIME2 NOT NULL CONSTRAINT DF_DmsUploaderPolicy_SeededAt DEFAULT(SYSUTCDATETIME()),
+          UpdatedAt DATETIME2 NOT NULL CONSTRAINT DF_DmsUploaderPolicy_UpdatedAt DEFAULT(SYSUTCDATETIME()),
+          UpdatedBy NVARCHAR(256) NULL
+        );
+        CREATE INDEX IX_DmsUploaderPolicy_Active ON DmsUploaderPolicy(Active, ApprovalRequired);
+        CREATE INDEX IX_DmsUploaderPolicy_Approver ON DmsUploaderPolicy(ApproverEmail);
       END
     `);
 
@@ -311,6 +361,7 @@ async function ensureTables() {
     console.log("[DB] Tables ensured");
   } catch (err) {
     console.error("[DB] ensureTables error:", err.message);
+    throw err;
   }
 }
 
@@ -468,11 +519,10 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+  limits: { fileSize: Number(process.env.DMS_MAX_UPLOAD_MB || 250) * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (!isAllowedExtension(file.originalname)) {
-      return cb(new Error("Unsupported file type. Allowed: .docx, .doc, .xlsx, .xls, .pdf"));
-    }
+    // DMS must accept arbitrary corporate document formats. Type-specific
+    // preview support is handled later; storage itself is intentionally broad.
     cb(null, true);
   },
 });
@@ -543,18 +593,262 @@ function sequenceToVersionLabel(seq) {
 async function getEmpContextByEmail(email) {
   const result = await spotPool
     .request()
-    .input("email", sql.NVarChar, email)
+    .input("email", sql.NVarChar, normaliseEmail(email))
     .query(`
       SELECT TOP 1
-        EmpEmail,
+        LOWER(EmpEmail) AS EmpEmail,
         EmpName,
         EmpID,
         ISNULL(Dept, '') AS Department,
-        ISNULL(EmpLocation, '') AS Location
+        ISNULL(EmpLocation, '') AS Location,
+        ManagerID
       FROM dbo.EMP
       WHERE EmpEmail = @email
     `);
   return result.recordset[0] || null;
+}
+
+async function getEmpColumns() {
+  const result = await spotPool.request().query(`
+    SELECT COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'EMP'
+  `);
+  return new Set(result.recordset.map((r) => String(r.COLUMN_NAME)));
+}
+
+function firstExisting(columns, candidates) {
+  return candidates.find((c) => columns.has(c)) || null;
+}
+
+async function getUploaderPolicy(email) {
+  const normalized = normaliseEmail(email);
+  const result = await dmsPool.request()
+    .input("email", sql.NVarChar, normalized)
+    .query(`
+      SELECT TOP 1 *
+      FROM DmsUploaderPolicy
+      WHERE Email=@email AND Active=1
+    `);
+  return result.recordset[0] || null;
+}
+
+async function canUploadDocuments(email) {
+  if (DEV_BYPASS_AUTH) return true;
+  const admin = await dmsPool.request()
+    .input("email", sql.NVarChar, normaliseEmail(email))
+    .query("SELECT TOP 1 1 AS ok FROM DmsAdmins WHERE Email=@email AND Active=1");
+  if (admin.recordset.length) return true;
+  return !!(await getUploaderPolicy(email));
+}
+
+async function upsertUploaderPolicy(row, updatedBy = "system") {
+  const email = normaliseEmail(row.email);
+  if (!email || !isPremierEmail(email)) return;
+  await dmsPool.request()
+    .input("email", sql.NVarChar, email)
+    .input("empId", sql.NVarChar, row.empId || null)
+    .input("empName", sql.NVarChar, row.empName || null)
+    .input("department", sql.NVarChar, row.department || null)
+    .input("location", sql.NVarChar, row.location || null)
+    .input("source", sql.NVarChar, row.source || "manual")
+    .input("approvalRequired", sql.Bit, row.approvalRequired ? 1 : 0)
+    .input("approverEmail", sql.NVarChar, row.approverEmail ? normaliseEmail(row.approverEmail) : null)
+    .input("approverName", sql.NVarChar, row.approverName || null)
+    .input("updatedBy", sql.NVarChar, updatedBy)
+    .query(`
+      MERGE DmsUploaderPolicy AS t
+      USING (SELECT @email AS Email) AS s
+      ON t.Email = s.Email
+      WHEN MATCHED THEN UPDATE SET
+        EmpID=@empId,
+        EmpName=@empName,
+        Department=@department,
+        Location=@location,
+        Source=CASE WHEN t.Source='manual' THEN t.Source ELSE @source END,
+        ApprovalRequired=@approvalRequired,
+        ApproverEmail=@approverEmail,
+        ApproverName=@approverName,
+        Active=1,
+        UpdatedAt=SYSUTCDATETIME(),
+        UpdatedBy=@updatedBy
+      WHEN NOT MATCHED THEN INSERT
+        (Email, EmpID, EmpName, Department, Location, Source, ApprovalRequired, ApproverEmail, ApproverName, UpdatedBy)
+        VALUES
+        (@email, @empId, @empName, @department, @location, @source, @approvalRequired, @approverEmail, @approverName, @updatedBy);
+    `);
+}
+
+async function seedUploaderPolicyFromEmp() {
+  if (!spotPool || !dmsPool) return;
+  try {
+    const columns = await getEmpColumns();
+    const designationCol = firstExisting(columns, [
+      "DesignationName",
+      "Designation",
+      "DesigName",
+      "JobTitle",
+      "EmpDesignation",
+    ]);
+    const hasManagerId = columns.has("ManagerID");
+    if (!hasManagerId) {
+      console.warn("[Seed] EMP.ManagerID not found. Only manual uploader seed will be applied.");
+    }
+
+    const seedEmp = await getEmpContextByEmail(UPLOADER_SEED_EMAIL);
+    let seedApprover = null;
+    if (seedEmp?.ManagerID) {
+      const mgr = await spotPool.request().input("mid", sql.NVarChar, seedEmp.ManagerID)
+        .query("SELECT TOP 1 LOWER(EmpEmail) AS EmpEmail, EmpName FROM dbo.EMP WHERE EmpID=@mid");
+      seedApprover = mgr.recordset[0] || null;
+    }
+    await upsertUploaderPolicy({
+      email: UPLOADER_SEED_EMAIL,
+      empId: seedEmp?.EmpID || null,
+      empName: seedEmp?.EmpName || "Aarnav Singh",
+      department: seedEmp?.Department || null,
+      location: seedEmp?.Location || null,
+      source: "manual_seed",
+      approvalRequired: !!seedApprover,
+      approverEmail: seedApprover?.EmpEmail || null,
+      approverName: seedApprover?.EmpName || null,
+    });
+
+    if (!designationCol || !hasManagerId) {
+      console.warn("[Seed] Could not infer designation/manager columns for MD hierarchy seed.");
+      return;
+    }
+
+    const mdQuery = `
+      SELECT TOP 1 EmpID, EmpName, LOWER(EmpEmail) AS EmpEmail, Dept AS Department, EmpLocation AS Location
+      FROM dbo.EMP
+      WHERE ActiveFlag=1
+        AND LOWER(EmpName) LIKE @mdName
+        AND LOWER(ISNULL(${designationCol}, '')) LIKE @mdDesignation
+      ORDER BY EmpID
+    `;
+    const md = await spotPool.request()
+      .input("mdName", sql.NVarChar, `%${MD_NAME.toLowerCase()}%`)
+      .input("mdDesignation", sql.NVarChar, `%${MD_DESIGNATION.toLowerCase()}%`)
+      .query(mdQuery);
+    const mdRow = md.recordset[0];
+    if (!mdRow?.EmpID) {
+      console.warn("[Seed] MD row not found in EMP; uploader hierarchy seed skipped.");
+      return;
+    }
+
+    const direct = await spotPool.request()
+      .input("managerId", sql.NVarChar, mdRow.EmpID)
+      .query(`
+        SELECT EmpID, EmpName, LOWER(EmpEmail) AS EmpEmail, Dept AS Department, EmpLocation AS Location
+        FROM dbo.EMP
+        WHERE ActiveFlag=1 AND ManagerID=@managerId AND EmpEmail IS NOT NULL
+      `);
+
+    for (const r of direct.recordset) {
+      await upsertUploaderPolicy({
+        email: r.EmpEmail,
+        empId: r.EmpID,
+        empName: r.EmpName,
+        department: r.Department,
+        location: r.Location,
+        source: "md_direct_report",
+        approvalRequired: false,
+        approverEmail: null,
+        approverName: null,
+      });
+    }
+
+    for (const manager of direct.recordset) {
+      const reportees = await spotPool.request()
+        .input("managerId", sql.NVarChar, manager.EmpID)
+        .query(`
+          SELECT EmpID, EmpName, LOWER(EmpEmail) AS EmpEmail, Dept AS Department, EmpLocation AS Location
+          FROM dbo.EMP
+          WHERE ActiveFlag=1 AND ManagerID=@managerId AND EmpEmail IS NOT NULL
+        `);
+      for (const r of reportees.recordset) {
+        await upsertUploaderPolicy({
+          email: r.EmpEmail,
+          empId: r.EmpID,
+          empName: r.EmpName,
+          department: r.Department,
+          location: r.Location,
+          source: "md_second_level",
+          approvalRequired: true,
+          approverEmail: manager.EmpEmail,
+          approverName: manager.EmpName,
+        });
+      }
+    }
+
+    console.log(`[Seed] Uploader policy seeded: 1 manual, ${direct.recordset.length} MD direct reports, direct reportees of each.`);
+  } catch (err) {
+    console.error("[Seed] uploader policy seed failed:", err.message);
+  }
+}
+
+async function createDocumentApprovalRoute(docId, version, doc, uploaderPolicy, actorEmail) {
+  if (!uploaderPolicy || !uploaderPolicy.ApprovalRequired) {
+    await dmsPool.request()
+      .input("docId", sql.Int, docId)
+      .query(`
+        UPDATE DmsDocuments
+        SET Status='approved', ApprovalStatus='approved', ApprovalRequired=0, ApprovedAt=SYSUTCDATETIME(), UpdatedAt=SYSUTCDATETIME()
+        WHERE Id=@docId
+      `);
+    await logAudit("document_auto_approved", "document", docId, actorEmail, "Uploader is direct report to MD or admin", null, { approvalRequired: false }, null);
+    return { status: "approved", approvalStatus: "approved", route: [] };
+  }
+
+  const approverEmail = normaliseEmail(uploaderPolicy.ApproverEmail || "");
+  if (!approverEmail) {
+    await dmsPool.request()
+      .input("docId", sql.Int, docId)
+      .query(`
+        UPDATE DmsDocuments
+        SET Status='pending_approval', ApprovalStatus='pending_admin_review', ApprovalRequired=1, UpdatedAt=SYSUTCDATETIME()
+        WHERE Id=@docId
+      `);
+    return { status: "pending_approval", approvalStatus: "pending_admin_review", route: [] };
+  }
+
+  const route = [{
+    stage: "business_approval",
+    approverEmail,
+    approverName: uploaderPolicy.ApproverName || approverEmail,
+    reason: "Uploader is in MD second-level list and requires approval from seeded manager.",
+  }];
+  await dmsPool.request()
+    .input("docId", sql.Int, docId)
+    .input("version", sql.Int, version)
+    .input("stage", sql.NVarChar, "business_approval")
+    .input("approverEmail", sql.NVarChar, approverEmail)
+    .query(`
+      INSERT INTO DmsApprovals (DocId, Version, Stage, ApproverEmail)
+      VALUES (@docId, @version, @stage, @approverEmail)
+    `);
+  await dmsPool.request()
+    .input("docId", sql.Int, docId)
+    .input("route", sql.NVarChar, JSON.stringify(route))
+    .query(`
+      UPDATE DmsDocuments
+      SET Status='pending_approval',
+          ApprovalStatus='pending_business_approval',
+          ApprovalRequired=1,
+          ApprovalRouteJson=@route,
+          UpdatedAt=SYSUTCDATETIME()
+      WHERE Id=@docId
+    `);
+  sendEmail(
+    approverEmail,
+    `[DMS] Approval Required: ${doc.Title || "Document"} v${version}`,
+    `<h3>Document Approval Required</h3>
+     <p><strong>${actorEmail}</strong> uploaded a document that requires your approval before it becomes visible.</p>
+     <p><strong>Title:</strong> ${doc.Title || "Untitled"}</p>
+     <p>Please open DMS → Approvals to approve or reject.</p>`
+  );
+  return { status: "pending_approval", approvalStatus: "pending_business_approval", route };
 }
 
 async function getScopeUsers(scope, groupId, actorEmail) {
@@ -711,6 +1005,7 @@ app.get("/api/session", requireAuth, async (req, res) => {
       `);
 
     const emp = empResult.recordset[0] || {};
+    const canUpload = await canUploadDocuments(email);
 
     res.json({
       email: req.user.email,
@@ -726,6 +1021,7 @@ app.get("/api/session", requireAuth, async (req, res) => {
       reportingManagerId: emp.ManagerID || null,
       reportingManagerEmail: emp.ReportingManagerEmail || null,
       reportingManagerName: emp.ReportingManagerName || null,
+      canUpload,
       employee: emp,
     });
   } catch (err) {
@@ -802,6 +1098,16 @@ app.post("/api/documents/extract-metadata", requireAuth, upload.single("file"), 
 // POST /api/documents/upload
 app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req, res) => {
   try {
+    const uploaderPolicy = await getUploaderPolicy(req.user.email);
+    const uploaderAllowed = await canUploadDocuments(req.user.email);
+    if (!uploaderAllowed) {
+      if (req.file?.path) fs.unlink(req.file.path, () => {});
+      return res.status(403).json({
+        error: "upload_not_allowed",
+        message: "You have view-only access. Ask an admin to add you to the DMS uploader policy.",
+      });
+    }
+
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
@@ -828,8 +1134,8 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       .query("SELECT TOP 1 EmpID, EmpName, Dept, EmpLocation, ManagerID FROM dbo.EMP WHERE EmpEmail = @email");
     const emp = empResult.recordset[0] || {};
 
-    const status = controlled ? "pending_approval" : "active";
-    const approvalStatus = controlled ? "pending_rm" : "none";
+    const status = "pending_approval";
+    const approvalStatus = "routing";
     const metadataText = typeof metadata === "string" ? metadata : JSON.stringify(metadata || {});
     const searchContent = extractSearchContent(filePath, `${title} ${description || ""} ${req.file.originalname} ${metadataText || ""}`);
 
@@ -856,14 +1162,15 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       .input("metadataJson", sql.NVarChar, metadataText || null)
       .input("validFrom", sql.Date, validFrom)
       .input("validTo", sql.Date, validTo)
+      .input("approvalRequired", sql.Bit, uploaderPolicy?.ApprovalRequired ? 1 : 0)
       .query(`
         INSERT INTO DmsDocuments
           (Title, Description, FileName, FilePath, FileSize, MimeType, IsControlled, Status, ShareScope, ShareGroupId, CurrentVersionLabel,
-           CreatorEmail, CreatorEmpId, Department, Location, FileHash, ApprovalStatus, SearchContent, MetadataJson, ValidFrom, ValidTo)
+           CreatorEmail, CreatorEmpId, Department, Location, FileHash, ApprovalStatus, SearchContent, MetadataJson, ValidFrom, ValidTo, ApprovalRequired)
         OUTPUT INSERTED.Id
         VALUES
           (@title, @description, @fileName, @filePath, @fileSize, @mimeType, @isControlled, @status, @shareScope, @shareGroupId, @currentVersionLabel,
-           @creatorEmail, @creatorEmpId, @department, @location, @fileHash, @approvalStatus, @searchContent, @metadataJson, @validFrom, @validTo)
+           @creatorEmail, @creatorEmpId, @department, @location, @fileHash, @approvalStatus, @searchContent, @metadataJson, @validFrom, @validTo, @approvalRequired)
       `);
 
     const docId = insertResult.recordset[0].Id;
@@ -946,8 +1253,20 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       );
     }
 
-    // If controlled, create approval for reporting manager
-    if (controlled && emp.ManagerID) {
+    const routeResult = await createDocumentApprovalRoute(
+      docId,
+      1,
+      { Title: title, Department: emp.Dept, Location: emp.EmpLocation },
+      uploaderPolicy || {
+        ApprovalRequired: false,
+        ApproverEmail: null,
+        ApproverName: null,
+      },
+      req.user.email
+    );
+
+    // Legacy HOD/DC workflow is intentionally disabled for the MD hierarchy policy.
+    if (false && controlled && emp.ManagerID) {
       const rmResult = await spotPool
         .request()
         .input("rmId", sql.NVarChar, emp.ManagerID)
@@ -979,9 +1298,15 @@ app.post("/api/documents/upload", requireAuth, upload.single("file"), async (req
       }
     }
 
-    await logAudit("document_upload", "document", docId, req.user.email, reason || "Initial upload", null, { title, controlled, status }, getIp(req));
+    await logAudit("document_upload", "document", docId, req.user.email, reason || "Initial upload", null, {
+      title,
+      controlled,
+      status: routeResult.status,
+      approvalStatus: routeResult.approvalStatus,
+      approvalRequired: !!uploaderPolicy?.ApprovalRequired,
+    }, getIp(req));
 
-    res.json({ success: true, id: docId, status, fileHash });
+    res.json({ success: true, id: docId, status: routeResult.status, approvalStatus: routeResult.approvalStatus, fileHash });
   } catch (err) {
     console.error("[Upload] error:", err.message);
     res.status(500).json({ error: "Upload failed" });
@@ -1034,6 +1359,11 @@ app.get("/api/documents", requireAuth, async (req, res) => {
         OR (d.ShareScope = 'group' AND d.ShareGroupId IS NOT NULL AND EXISTS (
           SELECT 1 FROM DmsShareGroupMembers sgm WHERE sgm.GroupId = d.ShareGroupId AND sgm.Email = @userEmail
         ))
+      )`);
+      whereClauses.push(`(
+        d.Status = 'approved'
+        OR d.CreatorEmail = @userEmail
+        OR EXISTS (SELECT 1 FROM DmsApprovals ap WHERE ap.DocId=d.Id AND ap.ApproverEmail=@userEmail)
       )`);
     }
 
@@ -1166,6 +1496,14 @@ app.get("/api/documents/:id", requireAuth, async (req, res) => {
     // Check access
     const isAdmin = (await dmsPool.request().input("ae", sql.NVarChar, req.user.email)
       .query("SELECT Email FROM DmsAdmins WHERE Email = @ae AND Active = 1")).recordset.length > 0;
+
+    if (!isAdmin && doc.Status !== "approved" && doc.CreatorEmail !== req.user.email) {
+      const pendingApprover = (await dmsPool.request()
+        .input("didPending", sql.Int, docId)
+        .input("uePending", sql.NVarChar, req.user.email)
+        .query("SELECT 1 FROM DmsApprovals WHERE DocId = @didPending AND ApproverEmail = @uePending")).recordset.length > 0;
+      if (!pendingApprover) return res.status(403).json({ error: "Document is pending approval" });
+    }
 
     if (!isAdmin && doc.CreatorEmail !== req.user.email) {
       const hasAccess = (await dmsPool.request()
@@ -1635,6 +1973,15 @@ app.delete("/api/documents/:id", requireAuth, async (req, res) => {
 app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), async (req, res) => {
   try {
     const docId = Number(req.params.id);
+    const uploaderPolicy = await getUploaderPolicy(req.user.email);
+    const uploaderAllowed = await canUploadDocuments(req.user.email);
+    if (!uploaderAllowed) {
+      if (req.file?.path) fs.unlink(req.file.path, () => {});
+      return res.status(403).json({
+        error: "upload_not_allowed",
+        message: "You have view-only access and cannot publish new versions.",
+      });
+    }
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
@@ -1714,16 +2061,17 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
       .input("metadataJson", sql.NVarChar, metadataText || doc.MetadataJson || null)
       .input("validFrom", sql.Date, resolvedValidFrom)
       .input("validTo", sql.Date, resolvedValidTo)
+      .input("approvalRequired", sql.Bit, uploaderPolicy?.ApprovalRequired ? 1 : 0)
       .query(`
         INSERT INTO DmsDocuments
           (Title, Description, FileName, FilePath, FileSize, MimeType, CurrentVersion, IsControlled,
            Status, ShareScope, ShareGroupId, CreatorEmail, CreatorEmpId, Department, Location,
-           FileHash, ParentDocId, ApprovalStatus, SearchContent, MetadataJson, CurrentVersionLabel, ValidFrom, ValidTo)
+           FileHash, ParentDocId, ApprovalStatus, SearchContent, MetadataJson, CurrentVersionLabel, ValidFrom, ValidTo, ApprovalRequired)
         OUTPUT INSERTED.Id
         VALUES
           (@title, @description, @fileName, @filePath, @fileSize, @mimeType, @currentVersion, @isControlled,
            @status, @shareScope, @shareGroupId, @creatorEmail, @creatorEmpId, @department, @location,
-           @fileHash, @parentDocId, @approvalStatus, @searchContent, @metadataJson, @currentVersionLabel, @validFrom, @validTo)
+           @fileHash, @parentDocId, @approvalStatus, @searchContent, @metadataJson, @currentVersionLabel, @validFrom, @validTo, @approvalRequired)
       `);
 
     const newDocId = insertResult.recordset[0].Id;
@@ -1754,8 +2102,16 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
         SELECT @newDocId, Email, AccessType FROM DmsDocAccess WHERE DocId = @oldDocId
       `);
 
-    // Create RM approval for new version – FIX: use ManagerID
-    if (emp.ManagerID) {
+    const routeResult = await createDocumentApprovalRoute(
+      newDocId,
+      newVersion,
+      { Title: doc.Title, Department: emp.Dept || doc.Department, Location: emp.EmpLocation || doc.Location },
+      uploaderPolicy || { ApprovalRequired: false, ApproverEmail: null, ApproverName: null },
+      req.user.email
+    );
+
+    // Legacy RM/HOD/DC workflow is intentionally disabled for the MD hierarchy policy.
+    if (false && emp.ManagerID) {
       const rmResult = await spotPool
         .request()
         .input("rmId", sql.NVarChar, emp.ManagerID)
@@ -1807,7 +2163,7 @@ app.post("/api/documents/:id/new-version", requireAuth, upload.single("file"), a
 
     await logAudit("document_new_version", "document", newDocId, req.user.email, reason || null, { version: doc.CurrentVersion }, { version: newVersion }, getIp(req));
 
-    res.json({ success: true, newDocId, version: newVersion, fileHash });
+    res.json({ success: true, newDocId, version: newVersion, status: routeResult.status, approvalStatus: routeResult.approvalStatus, fileHash });
   } catch (err) {
     console.error("[NewVersion] error:", err.message);
     res.status(500).json({ error: "New version upload failed" });
@@ -1967,7 +2323,24 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
     let nextStage = null;
     let docFullyApproved = false;
 
-    if (approval.Stage === "reporting_manager") {
+    if (approval.Stage === "business_approval") {
+      docFullyApproved = true;
+      const finalHash = await computeFileHash(doc.FilePath);
+      await dmsPool
+        .request()
+        .input("docId", sql.Int, docId)
+        .input("hash", sql.NVarChar, finalHash)
+        .query(`
+          UPDATE DmsDocuments
+          SET Status = 'approved',
+              ApprovalStatus = 'approved',
+              FileHash = @hash,
+              ApprovedAt = SYSUTCDATETIME(),
+              UpdatedAt = SYSUTCDATETIME()
+          WHERE Id = @docId
+        `);
+      await sendApprovalCompletionEmail(doc, version, req.user.email);
+    } else if (approval.Stage === "reporting_manager") {
       const hodResult = await dmsPool
         .request()
         .input("location", sql.NVarChar, doc.Location || "")
@@ -2026,7 +2399,7 @@ app.post("/api/approvals/:approvalId/approve", requireAuth, async (req, res) => 
         .input("hash", sql.NVarChar, finalHash)
         .query(`
           UPDATE DmsDocuments
-          SET Status = 'approved', ApprovalStatus = 'approved', FileHash = @hash, UpdatedAt = SYSUTCDATETIME()
+          SET Status = 'approved', ApprovalStatus = 'approved', FileHash = @hash, ApprovedAt = SYSUTCDATETIME(), UpdatedAt = SYSUTCDATETIME()
           WHERE Id = @docId
         `);
 
@@ -2196,11 +2569,17 @@ async function checkDocAccess(docId, email) {
     if (isAdmin) return true;
 
     const docResult = await dmsPool.request().input("id", sql.Int, docId)
-      .query("SELECT CreatorEmail, ShareScope, ShareGroupId, Department FROM DmsDocuments WHERE Id = @id AND Status != 'deleted'");
+      .query("SELECT CreatorEmail, ShareScope, ShareGroupId, Department, Status FROM DmsDocuments WHERE Id = @id AND Status != 'deleted'");
     if (docResult.recordset.length === 0) return false;
     const doc = docResult.recordset[0];
 
     if (doc.CreatorEmail === email) return true;
+
+    const isApprover = (await dmsPool.request().input("did2", sql.Int, docId).input("ue4", sql.NVarChar, email)
+      .query("SELECT 1 FROM DmsApprovals WHERE DocId = @did2 AND ApproverEmail = @ue4")).recordset.length > 0;
+    if (isApprover) return true;
+
+    if (doc.Status !== "approved") return false;
 
     const hasAccess = (await dmsPool.request().input("did", sql.Int, docId).input("ue", sql.NVarChar, email)
       .query("SELECT 1 FROM DmsDocAccess WHERE DocId = @did AND Email = @ue")).recordset.length > 0;
@@ -2219,10 +2598,6 @@ async function checkDocAccess(docId, email) {
         .query("SELECT 1 FROM DmsShareGroupMembers WHERE GroupId = @gid AND Email = @ue3")).recordset.length > 0;
       if (inGroup) return true;
     }
-
-    const isApprover = (await dmsPool.request().input("did2", sql.Int, docId).input("ue4", sql.NVarChar, email)
-      .query("SELECT 1 FROM DmsApprovals WHERE DocId = @did2 AND ApproverEmail = @ue4")).recordset.length > 0;
-    if (isApprover) return true;
 
     return false;
   } catch (err) {
@@ -2649,7 +3024,7 @@ app.get("/api/public/meta/:token", async (req, res) => {
                d.Title, d.FileName, d.MimeType, d.CurrentVersion, d.IsControlled, d.Status
         FROM DmsPublicLinks pl
         JOIN DmsDocuments d ON d.Id = pl.DocId
-        WHERE pl.LinkToken = @token
+        WHERE pl.LinkToken = @token AND d.Status = 'approved'
       `);
 
     if (linkResult.recordset.length === 0) {
@@ -2680,7 +3055,7 @@ app.get("/api/public/view/:token", async (req, res) => {
         SELECT pl.*, d.FileName, d.FilePath, d.MimeType, d.Title
         FROM DmsPublicLinks pl
         JOIN DmsDocuments d ON d.Id = pl.DocId
-        WHERE pl.LinkToken = @token AND pl.Active = 1 AND d.Status != 'deleted'
+        WHERE pl.LinkToken = @token AND pl.Active = 1 AND d.Status = 'approved'
       `);
 
     if (linkResult.recordset.length === 0) {
@@ -2961,6 +3336,114 @@ app.delete("/api/admin/admins/:email", requireAdmin, async (req, res) => {
   }
 });
 
+// ─── 7I.2 UPLOADER POLICY (admin only) ─────────────────────────
+
+app.get("/api/admin/uploaders", requireAdmin, async (_req, res) => {
+  try {
+    const result = await dmsPool.request().query(`
+      SELECT *
+      FROM DmsUploaderPolicy
+      WHERE Active=1
+      ORDER BY
+        CASE Source WHEN 'manual_seed' THEN 0 WHEN 'manual' THEN 1 WHEN 'md_direct_report' THEN 2 ELSE 3 END,
+        EmpName,
+        Email
+    `);
+    res.json({ uploaders: result.recordset });
+  } catch (err) {
+    console.error("[Uploaders] list error:", err.message);
+    res.status(500).json({ error: "Failed to fetch uploaders" });
+  }
+});
+
+app.post("/api/admin/uploaders/seed", requireAdmin, async (req, res) => {
+  try {
+    await seedUploaderPolicyFromEmp();
+    await logAudit("uploader_policy_seed", "uploader_policy", null, req.user.email, "Seeded from EMP hierarchy", null, null, getIp(req));
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[Uploaders] seed error:", err.message);
+    res.status(500).json({ error: "Failed to seed uploader policy" });
+  }
+});
+
+app.post("/api/admin/uploaders", requireAdmin, async (req, res) => {
+  try {
+    const email = normaliseEmail(req.body?.email || "");
+    if (!email || !isPremierEmail(email)) return res.status(400).json({ error: "valid_premier_email_required" });
+    const employee = await getEmpContextByEmail(email);
+    let approver = null;
+    if (req.body?.approverEmail) {
+      approver = await getEmpContextByEmail(req.body.approverEmail);
+    } else if (employee?.ManagerID) {
+      const mgr = await spotPool.request().input("mid", sql.NVarChar, employee.ManagerID)
+        .query("SELECT TOP 1 LOWER(EmpEmail) AS EmpEmail, EmpName FROM dbo.EMP WHERE EmpID=@mid");
+      approver = mgr.recordset[0] || null;
+    }
+    const approvalRequired = asBool(req.body?.approvalRequired);
+    if (approvalRequired && !(req.body?.approverEmail || approver?.EmpEmail)) {
+      return res.status(400).json({ error: "approver_required", message: "Approval-required uploaders need an approver from EMP or an explicit approverEmail." });
+    }
+    await upsertUploaderPolicy({
+      email,
+      empId: employee?.EmpID || req.body?.empId || null,
+      empName: employee?.EmpName || req.body?.empName || email,
+      department: employee?.Department || req.body?.department || null,
+      location: employee?.Location || req.body?.location || null,
+      source: "manual",
+      approvalRequired,
+      approverEmail: approvalRequired ? (req.body?.approverEmail || approver?.EmpEmail || null) : null,
+      approverName: approvalRequired ? (approver?.EmpName || null) : null,
+    }, req.user.email);
+    await logAudit("uploader_policy_add", "uploader_policy", null, req.user.email, null, null, { email }, getIp(req));
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[Uploaders] add error:", err.message);
+    res.status(500).json({ error: "Failed to add uploader" });
+  }
+});
+
+app.patch("/api/admin/uploaders/:email", requireAdmin, async (req, res) => {
+  try {
+    const email = normaliseEmail(decodeURIComponent(req.params.email || ""));
+    const existing = await dmsPool.request().input("email", sql.NVarChar, email)
+      .query("SELECT TOP 1 * FROM DmsUploaderPolicy WHERE Email=@email");
+    if (!existing.recordset.length) return res.status(404).json({ error: "uploader_not_found" });
+    const row = existing.recordset[0];
+    await upsertUploaderPolicy({
+      email,
+      empId: row.EmpID,
+      empName: row.EmpName,
+      department: row.Department,
+      location: row.Location,
+      source: row.Source || "manual",
+      approvalRequired: req.body?.approvalRequired === undefined ? !!row.ApprovalRequired : asBool(req.body.approvalRequired),
+      approverEmail: req.body?.approverEmail === undefined ? row.ApproverEmail : req.body.approverEmail,
+      approverName: row.ApproverName,
+    }, req.user.email);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[Uploaders] patch error:", err.message);
+    res.status(500).json({ error: "Failed to update uploader" });
+  }
+});
+
+app.delete("/api/admin/uploaders/:email", requireAdmin, async (req, res) => {
+  try {
+    const email = normaliseEmail(decodeURIComponent(req.params.email || ""));
+    if (email === UPLOADER_SEED_EMAIL) return res.status(400).json({ error: "cannot_remove_seed_uploader" });
+    await dmsPool.request()
+      .input("email", sql.NVarChar, email)
+      .input("updatedBy", sql.NVarChar, req.user.email)
+      .query("UPDATE DmsUploaderPolicy SET Active=0, UpdatedAt=SYSUTCDATETIME(), UpdatedBy=@updatedBy WHERE Email=@email");
+    await logAudit("uploader_policy_remove", "uploader_policy", null, req.user.email, null, { email }, { active: false }, getIp(req));
+    res.json({ success: true });
+  } catch (err) {
+    console.error("[Uploaders] delete error:", err.message);
+    res.status(500).json({ error: "Failed to remove uploader" });
+  }
+});
+
 // ─── 7J. ANALYTICS (admin only) ────────────────────────────────
 
 // GET /api/analytics/overview
@@ -3090,6 +3573,57 @@ app.get("/api/analytics/approval-stats", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("[Analytics] approval-stats error:", err.message);
     res.status(500).json({ error: "Failed to fetch approval stats" });
+  }
+});
+
+// GET /api/analytics/drilldown?dimension=department|location|user|status|approver&value=...
+app.get("/api/analytics/drilldown", requireAdmin, async (req, res) => {
+  try {
+    const dimension = String(req.query.dimension || "status").toLowerCase();
+    const value = String(req.query.value || "").trim();
+    const allowed = {
+      department: "d.Department",
+      location: "d.Location",
+      user: "d.CreatorEmail",
+      status: "d.Status",
+      approval: "d.ApprovalStatus",
+      approver: "a.ApproverEmail",
+    };
+    const col = allowed[dimension];
+    if (!col) return res.status(400).json({ error: "invalid_dimension" });
+
+    const rq = dmsPool.request();
+    let where = "d.Status != 'deleted'";
+    let join = "";
+    if (dimension === "approver") join = "LEFT JOIN DmsApprovals a ON a.DocId=d.Id";
+    if (value) {
+      rq.input("value", sql.NVarChar, value);
+      where += ` AND ${col} = @value`;
+    }
+    const docs = await rq.query(`
+      SELECT TOP 200
+        d.Id, d.Title, d.FileName, d.Status, d.ApprovalStatus, d.CreatorEmail,
+        d.Department, d.Location, d.CurrentVersion, d.CreatedAt, d.ApprovedAt,
+        d.ValidFrom, d.ValidTo
+      FROM DmsDocuments d
+      ${join}
+      WHERE ${where}
+      ORDER BY d.UpdatedAt DESC
+    `);
+
+    const events = await dmsPool.request()
+      .input("value", sql.NVarChar, value || null)
+      .query(`
+        SELECT TOP 200 Action, EntityType, EntityId, UserEmail, CreatedAt
+        FROM DmsAuditLog
+        WHERE (@value IS NULL OR UserEmail=@value OR Action=@value)
+        ORDER BY CreatedAt DESC
+      `);
+
+    res.json({ dimension, value, documents: docs.recordset, events: events.recordset });
+  } catch (err) {
+    console.error("[Analytics] drilldown error:", err.message);
+    res.status(500).json({ error: "Failed to fetch analytics drilldown" });
   }
 });
 
@@ -3224,6 +3758,7 @@ app.post("/api/admin/validity-reminders/run", requireAdmin, async (_req, res) =>
 async function boot() {
   await initPools();
   await ensureTables();
+  await seedUploaderPolicyFromEmp();
   await runValidityReminderJob();
   setInterval(() => {
     runValidityReminderJob().catch(() => {});

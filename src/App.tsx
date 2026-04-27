@@ -382,7 +382,10 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(() => window.innerWidth < 1024);
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  const navItems = [...NAV_USER, ...(user?.isAdmin ? NAV_ADMIN : [])];
+  const userNavItems = NAV_USER.filter(
+    (item) => item.to !== "/upload" || user?.canUpload || user?.isAdmin
+  );
+  const navItems = [...userNavItems, ...(user?.isAdmin ? NAV_ADMIN : [])];
   const currentLabel =
     navItems.find((n) => n.to === location.pathname)?.label || "DMS";
 
@@ -427,7 +430,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
               Navigation
             </p>
           )}
-          {NAV_USER.map((item) => (
+          {userNavItems.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -1273,6 +1276,18 @@ function UploadPage() {
       .catch(() => setExistingDocs([]));
   }, []);
 
+  if (!user?.canUpload && !user?.isAdmin) {
+    return (
+      <div className="max-w-2xl mx-auto py-20 text-center space-y-4">
+        <Lock className="h-12 w-12 text-muted-foreground/40 mx-auto" />
+        <h2 className="font-display text-3xl">View-Only Access</h2>
+        <p className="text-sm text-muted-foreground">
+          You can view approved documents, but you are not currently in the DMS uploader policy.
+        </p>
+      </div>
+    );
+  }
+
   const upload = async () => {
     if (!file) {
       toast({ title: "Select a file", variant: "info" });
@@ -1987,7 +2002,13 @@ function AdminUsersPage() {
   const toast = useAppToast();
   const [users, setUsers] = useState<Employee[]>([]);
   const [admins, setAdmins] = useState<any[]>([]);
+  const [uploaders, setUploaders] = useState<any[]>([]);
   const [search, setSearch] = useState("");
+  const [lookup, setLookup] = useState("");
+  const [lookupResults, setLookupResults] = useState<Employee[]>([]);
+  const [selectedUploaders, setSelectedUploaders] = useState<Employee[]>([]);
+  const [approvalRequired, setApprovalRequired] = useState(true);
+  const [seeding, setSeeding] = useState(false);
   const [newAdmin, setNewAdmin] = useState("");
   const [newUser, setNewUser] = useState({
     EmpID: "",
@@ -1999,27 +2020,242 @@ function AdminUsersPage() {
   });
 
   const load = async () => {
-    const [u, a] = await Promise.all([
+    const [u, a, up] = await Promise.all([
       api<{ users: Employee[] }>(
         `/api/admin/users?pageSize=100&search=${encodeURIComponent(search)}`
       ),
       api<any[]>("/api/admin/admins"),
+      api<{ uploaders: any[] }>("/api/admin/uploaders"),
     ]);
     setUsers(u.users || []);
     setAdmins(a || []);
+    setUploaders(up.uploaders || []);
   };
   useEffect(() => {
     load().catch(() => undefined);
   }, [search]);
+
+  useEffect(() => {
+    if (!lookup.trim()) {
+      setLookupResults([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      api<Employee[]>(`/api/employees/search?q=${encodeURIComponent(lookup)}`)
+        .then(setLookupResults)
+        .catch(() => setLookupResults([]));
+    }, 180);
+    return () => clearTimeout(t);
+  }, [lookup]);
+
+  const addUploaderCandidate = (emp: Employee) => {
+    const email = String(emp.EmpEmail || "").toLowerCase();
+    if (!email) return;
+    setSelectedUploaders((prev) => {
+      if (prev.some((x) => String(x.EmpEmail).toLowerCase() === email)) {
+        return prev;
+      }
+      return [...prev, emp];
+    });
+    setLookup("");
+    setLookupResults([]);
+  };
+
+  const saveUploaders = async () => {
+    if (!selectedUploaders.length) {
+      toast({ title: "Pick at least one uploader", variant: "info" });
+      return;
+    }
+    await Promise.all(
+      selectedUploaders.map((emp) =>
+        api("/api/admin/uploaders", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            email: emp.EmpEmail,
+            approvalRequired,
+          }),
+        })
+      )
+    );
+    toast({
+      title: "Uploader policy updated",
+      description: `${selectedUploaders.length} employee(s) can now upload.`,
+      variant: "success",
+    });
+    setSelectedUploaders([]);
+    await load();
+  };
+
+  const seedUploaders = async () => {
+    setSeeding(true);
+    try {
+      await api("/api/admin/uploaders/seed", { method: "POST" });
+      toast({
+        title: "Uploader hierarchy seeded",
+        description: "Aarnav, MD direct reportees, and their direct reportees were synced from EMP.",
+        variant: "success",
+      });
+      await load();
+    } finally {
+      setSeeding(false);
+    }
+  };
 
   return (
     <div className="space-y-6 animate-fade-in">
       <div>
         <h2 className="font-display text-3xl">User Management</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Create, search, and manage DMS users and admins.
+          Control upload eligibility from EMP. Everyone outside this list is view-only.
         </p>
       </div>
+
+      {/* Outlook-style uploader picker */}
+      <Card className="glass-elevated overflow-hidden" data-tour="users-create">
+        <CardHeader className="pb-3">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-emerald-600" />
+                Document Upload Policy
+              </CardTitle>
+              <CardDescription>
+                Search EMP by name, email, or employee ID, then add uploaders. Seed uses MD hierarchy automatically.
+              </CardDescription>
+            </div>
+            <Button variant="outline" onClick={seedUploaders} disabled={seeding}>
+              {seeding ? "Syncing..." : "Seed MD Hierarchy"}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid xl:grid-cols-[1.2fr_.8fr] gap-5">
+            <div className="space-y-3">
+              <div className="rounded-2xl border bg-white/70 p-3 shadow-inner">
+                <div className="flex flex-wrap gap-2 min-h-11 items-center">
+                  {selectedUploaders.map((emp) => (
+                    <button
+                      key={emp.EmpEmail}
+                      type="button"
+                      className="group rounded-full border border-primary/20 bg-primary/8 px-3 py-1.5 text-xs text-primary hover:bg-red-50 hover:text-red-700 hover:border-red-200 transition-colors"
+                      onClick={() =>
+                        setSelectedUploaders((prev) =>
+                          prev.filter((x) => x.EmpEmail !== emp.EmpEmail)
+                        )
+                      }
+                    >
+                      {emp.EmpName || emp.EmpEmail}
+                      <span className="ml-1 opacity-60 group-hover:opacity-100">×</span>
+                    </button>
+                  ))}
+                  <input
+                    value={lookup}
+                    onChange={(e) => setLookup(e.target.value)}
+                    placeholder="Type a name, email, or EmpID..."
+                    className="min-w-[220px] flex-1 bg-transparent px-2 py-2 text-sm outline-none"
+                  />
+                </div>
+              </div>
+
+              {lookupResults.length > 0 && (
+                <div className="rounded-xl border bg-white/90 shadow-xl overflow-hidden divide-y max-h-72 overflow-auto">
+                  {lookupResults.map((emp) => (
+                    <button
+                      key={emp.EmpEmail}
+                      type="button"
+                      className="w-full text-left p-3 hover:bg-primary/5 transition-colors flex items-center gap-3"
+                      onClick={() => addUploaderCandidate(emp)}
+                    >
+                      <div className="h-9 w-9 rounded-full bg-gradient-to-br from-primary/15 to-emerald-500/15 text-primary flex items-center justify-center text-xs font-bold">
+                        {(emp.EmpName || emp.EmpEmail || "?").slice(0, 1)}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium truncate">
+                          {emp.EmpName || "Unnamed Employee"}{" "}
+                          <span className="text-muted-foreground font-normal">
+                            {emp.EmpID ? `(${emp.EmpID})` : ""}
+                          </span>
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate">
+                          {emp.EmpEmail} · {emp.Department || emp.Dept || "No department"}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={approvalRequired}
+                    onCheckedChange={(v) => setApprovalRequired(Boolean(v))}
+                  />
+                  Require approval before visibility
+                </label>
+                <Button onClick={saveUploaders} disabled={!selectedUploaders.length}>
+                  Add Selected Uploaders
+                </Button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border bg-white/60 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <p className="text-sm font-semibold">Active Uploaders</p>
+                  <p className="text-xs text-muted-foreground">
+                    {uploaders.length} employees can upload
+                  </p>
+                </div>
+                <Badge variant="success" className="text-[10px]">RBAC Gate</Badge>
+              </div>
+              <div className="max-h-80 overflow-auto space-y-2 pr-1">
+                {uploaders.map((u) => (
+                  <div
+                    key={u.Email}
+                    className="rounded-xl border bg-white/70 p-3 text-sm hover:shadow-md transition-shadow"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="font-medium truncate">{u.EmpName || u.Email}</p>
+                        <p className="text-xs text-muted-foreground truncate">{u.Email}</p>
+                      </div>
+                      <Badge variant={u.ApprovalRequired ? "warning" : "success"} className="text-[10px] shrink-0">
+                        {u.ApprovalRequired ? "Approval" : "Auto"}
+                      </Badge>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        {u.Source}
+                      </span>
+                      {u.Email !== "aarnav.singh@premierenergies.com" && (
+                        <button
+                          className="text-[10px] text-destructive hover:underline"
+                          onClick={async () => {
+                            await api(`/api/admin/uploaders/${encodeURIComponent(u.Email)}`, {
+                              method: "DELETE",
+                            });
+                            toast({ title: "Uploader removed", variant: "success" });
+                            load();
+                          }}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                    {u.ApproverEmail && (
+                      <p className="text-[10px] text-muted-foreground mt-1">
+                        Approver: {u.ApproverName || u.ApproverEmail}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Create User */}
       <Card className="glass" data-tour="users-create">
@@ -2410,6 +2646,9 @@ function AnalyticsPage() {
   const [byDept, setByDept] = useState<any[]>([]);
   const [byLoc, setByLoc] = useState<any[]>([]);
   const [byUser, setByUser] = useState<any[]>([]);
+  const [drillDimension, setDrillDimension] = useState("department");
+  const [drillValue, setDrillValue] = useState("");
+  const [drill, setDrill] = useState<any>(null);
 
   useEffect(() => {
     Promise.all([
@@ -2426,6 +2665,14 @@ function AnalyticsPage() {
       })
       .catch(() => undefined);
   }, []);
+
+  const loadDrilldown = async (dimension = drillDimension, value = drillValue) => {
+    const p = new URLSearchParams();
+    p.set("dimension", dimension);
+    if (value) p.set("value", value);
+    const data = await api<any>(`/api/analytics/drilldown?${p}`);
+    setDrill(data);
+  };
 
   const pie = useMemo(
     () =>
@@ -2485,6 +2732,11 @@ function AnalyticsPage() {
                 dataKey="DocumentCount"
                 fill="#0c4a6e"
                 radius={[6, 6, 0, 0]}
+                onClick={(data: any) => {
+                  setDrillDimension("department");
+                  setDrillValue(data?.Department || "");
+                  loadDrilldown("department", data?.Department || "");
+                }}
               />
             </BarChart>
           </ResponsiveContainer>
@@ -2507,6 +2759,11 @@ function AnalyticsPage() {
                   dataKey="DocumentCount"
                   fill="#059669"
                   radius={[6, 6, 0, 0]}
+                  onClick={(data: any) => {
+                    setDrillDimension("location");
+                    setDrillValue(data?.Location || "");
+                    loadDrilldown("location", data?.Location || "");
+                  }}
                 />
               </BarChart>
             </ResponsiveContainer>
@@ -2557,12 +2814,100 @@ function AnalyticsPage() {
                   </span>
                   {u.CreatorEmail}
                 </span>
-                <Badge variant="outline" className="text-[10px]">
+                <Badge
+                  variant="outline"
+                  className="text-[10px] cursor-pointer"
+                  onClick={() => {
+                    setDrillDimension("user");
+                    setDrillValue(u.CreatorEmail);
+                    loadDrilldown("user", u.CreatorEmail);
+                  }}
+                >
                   {u.DocumentCount}
                 </Badge>
               </div>
             ))}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="glass-elevated">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            Analytics Drilldown
+          </CardTitle>
+          <CardDescription>
+            Click a chart bar or query a dimension manually to inspect source documents and recent events.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col md:flex-row gap-2">
+            <Select value={drillDimension} onValueChange={setDrillDimension}>
+              <SelectTrigger className="md:w-52">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="department">Department</SelectItem>
+                <SelectItem value="location">Location</SelectItem>
+                <SelectItem value="user">Uploader</SelectItem>
+                <SelectItem value="status">Document Status</SelectItem>
+                <SelectItem value="approval">Approval Status</SelectItem>
+                <SelectItem value="approver">Approver</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              value={drillValue}
+              onChange={(e) => setDrillValue(e.target.value)}
+              placeholder="Exact value, e.g. IT or aarnav.singh@premierenergies.com"
+            />
+            <Button onClick={() => loadDrilldown()}>Drill Down</Button>
+          </div>
+
+          {drill && (
+            <div className="grid xl:grid-cols-2 gap-4">
+              <div className="rounded-xl border bg-white/60 overflow-hidden">
+                <div className="px-4 py-3 border-b text-sm font-semibold">
+                  Documents ({drill.documents?.length || 0})
+                </div>
+                <div className="max-h-80 overflow-auto divide-y">
+                  {(drill.documents || []).map((d: any) => (
+                    <div key={d.Id} className="p-3 text-sm hover:bg-muted/20">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium truncate">{d.Title}</span>
+                        <Badge variant={d.Status === "approved" ? "success" : "warning"} className="text-[10px]">
+                          {d.Status}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {d.CreatorEmail} · {d.Department || "No department"} · v{d.CurrentVersion}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-xl border bg-white/60 overflow-hidden">
+                <div className="px-4 py-3 border-b text-sm font-semibold">
+                  Recent Events ({drill.events?.length || 0})
+                </div>
+                <div className="max-h-80 overflow-auto divide-y">
+                  {(drill.events || []).map((e: any, i: number) => (
+                    <div key={`${e.Action}-${i}`} className="p-3 text-sm hover:bg-muted/20">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{e.Action}</span>
+                        <span className="text-[10px] text-muted-foreground">
+                          {new Date(e.CreatedAt).toLocaleString()}
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {e.UserEmail || "System"} · {e.EntityType || "entity"} #{e.EntityId || "-"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
